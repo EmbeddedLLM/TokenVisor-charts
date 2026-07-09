@@ -1,0 +1,19 @@
+{{- if and .Values.dragonfly.enabled (.Capabilities.APIVersions.Has "dragonflydb.io/v1alpha1") }}
+apiVersion: dragonflydb.io/v1alpha1
+kind: Dragonfly
+metadata:
+  name: dragonfly
+  namespace: {{ include "tokenvisor.namespace" . }}
+  labels:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: dragonfly
+    app.kubernetes.io/part-of: dragonfly-operator
+    app.kubernetes.io/created-by: dragonfly-operator
+spec:
+  replicas: {{ .Values.dragonfly.replicas }}
+{{- include "tokenvisor.haScheduling" (dict "ctx" $ "svc" .Values.dragonfly "podLabels" (dict "app.kubernetes.io/name" "dragonfly" "app.kubernetes.io/part-of" "dragonfly")) | nindent 2 }}
+{{- with .Values.dragonfly.resources }}
+  resources:
+{{- toYaml . | nindent 4 }}
+{{- end }}
+{{- end }}

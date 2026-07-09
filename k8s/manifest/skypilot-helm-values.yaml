@@ -1,0 +1,37 @@
+apiService:
+  image: ghcr.io/embeddedllm/skypilot:v0.12.0
+  config: |
+    serve:
+      controller:
+        resources:
+          cloud: kubernetes
+          cpus: 4+
+          disk_size: 50
+        high_availability: true
+    kubernetes:
+      ports: podip
+      high_availability:
+        storage_class_name: openebs-three-replica
+  resources:
+    requests:
+      cpu: "4"
+      memory: "8Gi"
+  serveServerLog: false
+  # skipResourceCheck: true
+  # HA Setup (Uncomment for HA)
+  # nodeSelector:
+  #   node-role.kubernetes.io/control-plane: "true"
+  # tolerations:
+  #   - key: node-role.kubernetes.io/control-plane
+  #     operator: Exists
+  #     effect: NoSchedule
+
+storage:
+  # storageClassName: local-path
+  storageClassName: openebs-three-replica
+
+ingress:
+  enabled: false
+
+ingress-nginx:
+  enabled: false

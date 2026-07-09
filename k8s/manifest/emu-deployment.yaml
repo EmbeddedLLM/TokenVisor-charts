@@ -1,0 +1,136 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: tokenvisor
+  name: emu-deployment
+  labels:
+    app: emu
+spec:
+  # HA Setup (Uncomment for HA)
+  # replicas: 3
+  # strategy:
+  #   type: RollingUpdate
+  #   rollingUpdate:
+  #     maxSurge: 0
+  #     maxUnavailable: 1
+  replicas: 1
+  selector:
+    matchLabels:
+      app: emu
+  template:
+    metadata:
+      labels:
+        app: emu
+        app.kubernetes.io/instance: tokenvisor-emu-otel
+        app.kubernetes.io/part-of: emu-backend
+    spec:
+      # HA Setup (Uncomment for HA)
+      # nodeSelector:
+      #   node-role.kubernetes.io/control-plane: "true"
+      # tolerations:
+      #   - key: node-role.kubernetes.io/control-plane
+      #     operator: Exists
+      #     effect: NoSchedule
+      # affinity:
+      #   podAntiAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       - labelSelector:
+      #           matchLabels:
+      #             app: emu
+      #         topologyKey: "kubernetes.io/hostname"
+      imagePullSecrets:
+        - name: github-registry-secret
+      containers:
+        - name: emu
+          image: ghcr.io/embeddedllm/tokenvisor-emu:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: emu-config
+            - secretRef:
+                name: emu-secret
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              uv run --no-sync python -m emu.entrypoints.api
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 5969
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 5969
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "2000m"
+              memory: "2Gi"
+          volumeMounts:
+            - name: model-storage
+              mountPath: /hf_repo
+        # OpenTelemetry Collector sidecar
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.113.0
+          args: ["--config=/etc/otelcol/config.yaml"]
+          ports:
+            - name: metrics
+              containerPort: 8889
+          volumeMounts:
+            - name: otel-config
+              mountPath: /etc/otelcol/config.yaml
+              subPath: config.yaml
+          resources:
+            requests:
+              cpu: "300m"
+              memory: "128Mi"
+            limits:
+              cpu: "1000m"
+              memory: "256Mi"
+      volumes:
+        - name: otel-config
+          configMap:
+            name: otel-collector-config
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: nfs-model-storage-pvc
+      serviceAccount: emu
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: tokenvisor
+  labels:
+    app: emu
+    app.kubernetes.io/part-of: emu-backend
+  name: emu-api-server
+spec:
+  selector:
+    app: emu
+  ports:
+    - name: http
+      port: 5969
+      targetPort: 5969
+  type: ClusterIP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  namespace: tokenvisor
+  name: emu-pdb
+spec:
+  minAvailable: 1 # Ensure at least 1 Pod is always available
+  selector:
+    matchLabels:
+      app: emu
+---

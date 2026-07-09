@@ -1,0 +1,114 @@
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: Grafana
+metadata:
+  name: tokenvisor-grafana
+  labels:
+    dashboards: tokenvisor-grafana
+spec:
+  config:
+    log:
+      mode: "console"
+    auth:
+      disable_login_form: "false"
+    security:
+      admin_user: tokenvisor-admin
+      admin_password: tv-admin-dashboard
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: vm-datasource
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  datasource:
+    access: proxy
+    type: victoriametrics-metrics-datasource
+    name: tokenvisor-vm
+    url: http://vmselectinternal-victoria-cluster.tokenvisor.svc.cluster.local:8481/select/0/prometheus
+  plugins:
+    - name: victoriametrics-metrics-datasource
+      version: 0.13.3
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: vm-prom-datasource
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  datasource:
+    access: proxy
+    name: tokenvisor-vm-prometheus
+    type: prometheus
+    url: http://vmselectinternal-victoria-cluster.tokenvisor.svc.cluster.local:8481/select/0/prometheus
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: clickhouse-datasource
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  datasource:
+    type: grafana-clickhouse-datasource
+    access: proxy
+    name: clickhouse-datasource
+    jsonData:
+      defaultDatabase: tokenvisor_emu
+      name: clickhouse-datasource
+      port: 9000
+      host: clickhouse-tokenvisor.tokenvisor.svc.cluster.local
+      username: emu_readonly
+      traces:
+        defaultDatabase: tokenvisor_emu
+        defaultTable: emu_traces
+        otelEnabled: true
+    secureJsonData:
+      password: emureadonlypassword
+  plugins:
+    - name: grafana-clickhouse-datasource
+      version: 4.8.2
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: altinity-clickhouse-datasource
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  datasource:
+    name: k8s-tokenvisor-tokenvisor
+    type: vertamedia-clickhouse-datasource
+    access: proxy
+    url: http://clickhouse-tokenvisor.tokenvisor.svc.cluster.local:8123
+    basicAuth: true
+    isDefault: false
+    editable: true
+    basicAuthUser: emu_readonly
+    jsonData:
+      defaultDatabase: tokenvisor_emu
+    secureJsonData:
+      basicAuthPassword: emureadonlypassword
+  plugins:
+    - name: vertamedia-clickhouse-datasource
+      version: 3.3.1
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: vm-dashboard
+spec:
+  resyncPeriod: 30s
+  plugins:
+    - name: victoriametrics-metrics-datasource
+      version: 0.13.3
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  url: "https://raw.githubusercontent.com/VictoriaMetrics/VictoriaMetrics/refs/heads/master/dashboards/vm/victoriametrics-cluster.json"

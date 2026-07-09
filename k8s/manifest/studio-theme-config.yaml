@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: studio-themes
+  namespace: tokenvisor
+data:
+  theme.css: |
+    :root {
+      --background: 216 24% 96%;
+      --foreground: 222.2 84% 4.9%;
+
+      --muted: 220 14% 96%;
+      --muted-foreground: 220 9% 56%;
+      
+      --popover: 0 0% 100%;
+      --popover-foreground: 222.2 84% 4.9%;
+      
+      --card: 0 0% 100%;
+      --card-foreground: 222.2 84% 4.9%;
+      
+      --border: 214.3 31.8% 88%;
+      --input: 214.3 31.8% 91.4%;
+      
+      --primary: 192 67% 32%;
+      --primary-foreground: 210 40% 98%;
+      
+      /* Secondary color scale */
+      --secondary-50: 210 40% 98%;
+      --secondary-100: 210 40% 96%;
+      --secondary-200: 213 26% 88%;
+      --secondary-300: 215 18% 80%;
+      --secondary-400: 215 17% 72%;
+      --secondary-500: 215 16% 65%;
+      --secondary-600: 215 16% 57%;
+      --secondary-700: 215 16% 45%;
+      --secondary-800: 215 16% 30%;
+      --secondary-900: 216 18% 18%;
+      
+      /* Semantic aliases */
+      --secondary: var(--secondary-200);
+      --secondary-foreground: var(--secondary-800);
+      
+      --tertiary: 184 52% 63%;
+      --tertiary-foreground: 192 67% 32%;
+      
+      --highlight: 280 53% 48%;
+      --highlight-foreground: 0 0% 100%;
+      
+      --accent: 77 100% 93%;
+      --accent-strong: 87 82% 64%;
+      --accent-foreground: 222.2 47.4% 11.2%;
+      
+      --destructive: 0 72.2% 50.6%;
+      --destructive-foreground: 210 40% 98%;
+      
+      --success: 138 76% 97%;
+      --success-foreground: 142 72% 29%;
+      
+      --error: 0 84% 60%;
+      --error-foreground: 210 40% 98%;
+      
+      --warning: 38 85% 60%;
+      --warning-foreground: 0 0% 100%;
+      
+      --ring: 222.2 84% 4.9%;
+      
+      --radius: 0.75rem;
+      
+      --navbar-system-from: 210 12% 34%;
+      --navbar-system-to: 208 31% 70%;
+      
+      --navbar-organization-from: 193 100% 33%;
+      --navbar-organization-to: 189 100% 13%;
+      
+      --navbar-project-from: 253 32% 61%;
+      --navbar-project-to: 247 21% 28%;
+    }

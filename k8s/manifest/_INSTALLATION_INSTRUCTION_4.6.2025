@@ -1,0 +1,303 @@
+### INSTALL Kubernetes Distro of Choice ###
+RKE2: _INSTALLATION_RKE2.md 
+K3S: _INSTALLATION_K3S.md 
+
+### INSTALL Helm ###
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+### INSTALL Cilium CRD ###
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/standard/gateway.networking.k8s.io_gatewayclasses.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/standard/gateway.networking.k8s.io_gateways.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/standard/gateway.networking.k8s.io_httproutes.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/standard/gateway.networking.k8s.io_referencegrants.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/standard/gateway.networking.k8s.io_grpcroutes.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/experimental/gateway.networking.k8s.io_tlsroutes.yaml
+# RESTART Cilium Agents & Operators if Cilium is installed using RKE2 to initialise gateway controller
+# kubectl -n kube-system rollout restart deployment/cilium-operator
+# kubectl -n kube-system rollout restart ds/cilium
+
+### INSTALL Cilium CLI (SKIP IF RKE2) ###
+CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+CLI_ARCH=amd64
+if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
+curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+sha256sum --check cilium-linux-${CLI_ARCH}.tar.gz.sha256sum
+sudo tar xzvfC cilium-linux-${CLI_ARCH}.tar.gz /usr/local/bin
+rm cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+
+### INSTALL Cilium k8s components (SKIP IF RKE2) ###
+cilium install --version 1.17.3 \
+    --set=ipam.operator.clusterPoolIPv4PodCIDRList="10.42.0.0/16" \
+    --set kubeProxyReplacement=true \
+    --set k8sServiceHost="127.0.0.1" \
+    --set k8sServicePort="6443" \
+    --set gatewayAPI.enabled=true \
+    --set authentication.mutual.spire.enabled=true \
+    --set authentication.mutual.spire.install.enabled=true \
+    --set prometheus.enabled=true \
+    --set operator.prometheus.enabled=true \
+    --set hubble.enabled=true \
+    --set hubble.metrics.enabled="{dns,drop,tcp,flow,port-distribution,icmp,httpV2:exemplars=true;labelsContext=source_ip\,source_namespace\,source_workload\,destination_ip\,destination_namespace\,destination_workload\,traffic_direction}"
+
+# Specify routing device if cilium couldn't automatically decide a device (e.g. sakura)
+    --set directRoutingDevice=br-host \
+    --set devices=br-host
+
+
+### Setup Storage ###
+Production: OpenEBS
+Development: local-path-provisioner
+
+### CREATE tokenvisor namespace ###
+kubectl create namespace tokenvisor
+
+### INSTALL ServiceMonitor/PodMonitor CRD ###
+# VM will automatically convert these into VM counter part
+kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.87.1/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
+kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.87.1/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml
+
+### INSTALL VM Operator (allow serviceMonitor to be possible) ###
+helm repo add vm https://victoriametrics.github.io/helm-charts/
+helm repo update
+kubectl create ns vm-operator-system
+# # HACK: install first with serviceMonitor.enabled = false (this can install the crds that's managed by helm and in the proper ns)
+# As of 2026-02-06 the above doesn't install the ServiceMonitor/PodMonitor crds, install from source with above command
+helm install vmoperator vm/victoria-metrics-operator -f vm-operator-values.yaml -n vm-operator-system --set serviceMonitor.enabled=false --version 0.62.1
+helm upgrade vmoperator vm/victoria-metrics-operator -f vm-operator-values.yaml -n vm-operator-system --version 0.62.1
+
+
+### INSTALL Dragonfly operator with helm ###
+# To get the complete chart, as of 2025-03-11, version = v1.1.10
+# helm show values oci://ghcr.io/dragonflydb/dragonfly-operator/helm/dragonfly-operator --version v1.1.10
+kubectl create ns dragonfly-operator-system
+helm upgrade -f dragonfly-operator-values.yaml -n dragonfly-operator-system --install dragonfly-operator oci://ghcr.io/dragonflydb/dragonfly-operator/helm/dragonfly-operator --version v1.1.10
+# HACK: patch the metrics address binding to 0.0.0.0 (hopefully get fixed in the future chart)
+kubectl patch deployment dragonfly-operator -n dragonfly-operator-system --type='json' -p='[
+  {
+    "op": "replace",
+    "path": "/spec/template/spec/containers/1/args/1",
+    "value": "--metrics-bind-address=0.0.0.0:8080"
+  }
+]'
+kubectl apply -f dragonfly-replica-deploy.yaml -n tokenvisor
+
+### INSTALL Clickhouse ###
+kubectl create ns clickhouse-operator-system
+helm repo add clickhouse-operator https://docs.altinity.com/clickhouse-operator/
+# set the watch namespace to include tokenvisor, and enable grafana dashboard config
+helm install clickhouse-operator clickhouse-operator/altinity-clickhouse-operator -n clickhouse-operator-system -f clickhouse-operator-values.yaml
+kubectl apply -f clickhouse-cluster-deploy.yaml -n tokenvisor
+kubectl apply -f clickhouse-init-db.yaml -n tokenvisor
+
+### INSTALL Skypilot API Server ###
+kubectl create ns skypilot
+kubectl apply -f skypilot-repo-secret.yaml -n skypilot
+
+helm repo add skypilot https://helm.skypilot.co
+helm repo update
+helm upgrade --install skypilot skypilot/skypilot --version 0.12.0 --namespace skypilot -f skypilot-helm-values.yaml
+
+### INSTALL CloudnativePG ###
+helm repo add cnpg https://cloudnative-pg.github.io/charts
+kubectl create ns cnpg-operator-system
+helm upgrade --install cnpg -n cnpg-operator-system cnpg/cloudnative-pg -f cnpg-operator-values.yaml
+kubectl apply -f cnpg-cluster-deploy.yaml -n tokenvisor
+
+### INSTALL Victoria Metrics cluster and log ###
+helm install vls vm/victoria-logs-single -f victoria-logs-single-deploy.yaml -n tokenvisor --version 0.11.19
+kubectl apply -f vm-config-clusters.yaml -n tokenvisor
+
+### INSTALL grafana ###
+kubectl create ns grafana-operator-system
+helm upgrade -i grafana-operator oci://ghcr.io/grafana/helm-charts/grafana-operator --version v5.17.0 -f grafana-operator-values.yaml -n grafana-operator-system
+kubectl apply -f grafana-dashboards.yaml
+kubectl apply -f grafana-deploy.yaml -n tokenvisor
+kubectl apply -f grafana-tokenvisor-emu-dashboard.yaml  -n tokenvisor
+kubectl apply -f grafana-tokenvisor-traces-dashboard.yaml  -n tokenvisor
+
+### Setup NFS Model Storage ###
+kubectl create ns nfs-server
+helm repo add csi-driver-nfs https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts  --set node.enableVolumeStats=true
+helm install csi-driver-nfs csi-driver-nfs/csi-driver-nfs --namespace nfs-server --version 4.11.0
+
+# If needed to provision internal NFS  NFS server + OpenEBS/Local Backend
+kubectl apply -f nfs-server-pvc.yaml
+kubectl apply -f nfs-server-deployment.yaml
+
+# Else (Note that this is Static NFS Provision)
+kubectl apply -f nfs-csi-storageclass.yaml
+kubectl apply -f nfs-model-storage-pv.yaml
+kubectl apply -f nfs-model-storage-pvc.yaml
+
+### INSTALL Tokenvisor ###
+# Configure emu-secrets and emu-config accordingly
+# IMPORTANT: make sure the nfs-model-storage-pvc is created first.
+kubectl apply -f emu-service-account.yaml -n tokenvisor
+kubectl apply -f emu-secret.yaml -n tokenvisor
+kubectl apply -f emu-config.yaml -n tokenvisor
+kubectl apply -f emu-deployment.yaml -n tokenvisor
+kubectl apply -f starling-deployment.yaml -n  tokenvisor
+# Configure studio-deployment and studio-config accordingly
+# Configure studio-logo-config if there custom logo is required
+kubectl apply -f studio-logo-config.yaml -n tokenvisor
+kubectl apply -f studio-theme-config.yaml -n tokenvisor 
+kubectl apply -f studio-config.yaml -n tokenvisor
+kubectl apply -f studio-deployment.yaml -n tokenvisor 
+
+### INSTALL Gateway & Routes ###
+kubectl apply -f network-gatewayclass-and-gateway.yaml -n tokenvisor
+kubectl apply -f network-http-route.yaml -n tokenvisor
+# If L2 Load Balancing is required. e.g. w/o external load balancer
+# Configure Cilium to enable L2 Announcement first
+kubectl apply -f network-cilium-l2-loadbalancer.yaml
+
+##################################################
+###   Additional Setup Depending on Scenario   ###
+##################################################
+
+### INSTALL Nvidia GPU Operator ###
+# Install Nvidia drivers via APT and freeze hold the packages
+# Sometimes it is neccessary to install nvidia-fabric-manager packages, or else GPU Operator will fail
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia && helm repo update
+helm install nvidia-gpu-operator \
+  --namespace nvidia-gpu-operator nvidia/gpu-operator \
+  --set driver.enabled=false \
+  --set toolkit.enabled=false \
+  --set migManager.enabled=false \
+  --create-namespace
+
+### INSTALL cert-manager ###
+helm repo add jetstack https://charts.jetstack.io --force-update
+helm install cert-manager jetstack/cert-manager \
+  --namespace cert-manager \
+  --create-namespace \
+  --version v1.17.2 \
+  --set crds.enabled=true
+
+### INSTALL AMD GPU Operator ###
+# Install AMD drivers and freeze hold the packages
+# Ensure certManager is installed
+# If developing in AMD vGPU (e.g. AMD Dev Cloud), add
+# --set-json 'deviceConfig.spec.selector={"feature.node.kubernetes.io/amd-gpu":null,"feature.node.kubernetes.io/amd-vgpu":"true"}'
+# Install cert-manager first
+
+kubectl create ns amd-gpu-operator
+kubectl apply -f amd-metrics-exporter-config.yaml -n amd-gpu-operator
+
+helm repo add rocm https://rocm.github.io/gpu-operator && helm repo update
+helm install amd-gpu-operator \
+  --namespace amd-gpu-operator rocm/gpu-operator-charts \
+  --set deviceConfig.spec.testRunner.enable=true \
+  --set deviceConfig.spec.metricsExporter.config.name=amd-metrics-exporter-config
+
+### INSTALL OpenEBS Replicated Store ###
+# Ensure atleast 1024 HugePages are available
+grep HugePages /proc/meminfo | grep HugePages_
+echo 1024 | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+echo vm.nr_hugepages = 1024 | sudo tee -a /etc/sysctl.conf
+# Ensure nvme_tcp kernel module is enabled on each datanode,
+# Ensure nvme_core.multipath=Y is set on each datanode for High Availability (HA).
+# Ubuntu 24.04 requires to install nvme-tcp kernel: sudo apt install -y linux-modules-extra-$(uname -r)
+sudo modprobe nvme-tcp
+echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf
+cat /sys/module/nvme_core/parameters/multipath
+
+# Label each of the k8s datanode that will host the data
+kubectl label node $NODE_NAME_1 openebs.io/engine=mayastor
+
+helm repo add openebs https://openebs.github.io/openebs
+helm repo update
+helm install openebs --namespace openebs openebs/openebs \
+  --set engines.local.lvm.enabled=false \
+  --set engines.local.zfs.enabled=false \
+  --set openebs-crds.csi.volumeSnapshots.enabled=false \
+  --set lvm-localpv.crds.lvmLocalPv.enabled=false \
+  --set zfs-localpv.crds.zfsLocalPv.enabled=false \
+  --create-namespace
+
+# Configure the disks on each node in the yaml accordingly
+kubectl apply -f openebs-diskpool-node.yaml -n openebs
+kubectl get dsp -n openebs
+kubectl apply -f openebs-storageclass-three-replica.yaml
+kubectl get storageclass
+
+### INSTALL Local Path Provisioner ###
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.32/deploy/local-path-storage.yaml
+
+### INSTALL alerting stacks ###
+kubectl apply -n tokenvisor -f vm-alert-deploy.yaml
+# remember to update the discord webhook_url appropriately 
+kubectl apply -n tokenvisor -f vm-alert-config.yaml
+kubectl apply -f grafana-vmalert-dashboards.yaml
+
+### INSTALL Fluent stacks (for log collector) ###
+# kinda important to increase the max watchers sizes
+# This is per session
+sudo sysctl -w fs.inotify.max_user_watches=2097152 \
+            fs.inotify.max_user_instances=4096 \
+            fs.inotify.max_queued_events=65536
+# To persists
+sudo tee /etc/sysctl.d/99-inotify.conf >/dev/null <<'EOF'
+fs.inotify.max_user_watches=2097152
+fs.inotify.max_user_instances=4096
+fs.inotify.max_queued_events=65536
+EOF
+sudo sysctl --system
+# use helm to install fluent operator
+helm repo add fluent https://fluent.github.io/helm-charts
+# IMPORTANT: use the container runtime that's used by your k8s cluster
+# rke2/k3s default runtime is containerd
+helm upgrade --install fluent-operator fluent/fluent-operator \
+  -n fluent-operator-system \
+  --create-namespace \
+  -f fluent-operator-values.yaml
+# install fluent-bit daemonset and configs, to be in the same ns as operator
+kubectl apply -n fluent-operator-system -f fluent-bit-deploy.yaml
+kubectl apply -n fluent-operator-system -f fluent-bit-config.yaml
+
+## upgrade fluent operator crd if needed, as helm does not managed the crd life cycle: https://helm.sh/docs/chart_best_practices/custom_resource_definitions/)
+# wget https://github.com/fluent/fluent-operator/releases/download/v3.4.0/fluent-operator.tgz
+# tar -xzvf fluent-operator.tgz
+# kubectl replace -f fluent-operator/crds
+
+### NOT USED AT THE MOMENT ###
+# SETUP Local Huggingface Cache
+sudo apt update
+sudo apt install pipx
+pipx ensurepath
+pipx install "huggingface_hub[cli]"
+HF_HOME=/mnt/data/hfcache huggingface-cli download deepseek-ai/DeepSeek-R1
+
+# INSTALL rqlite
+helm repo add rqlite https://rqlite.github.io/helm-charts 
+helm upgrade -i -n tokenvisor rqlite rqlite/rqlite -f rqlite-deploy.yaml 
+
+# INSTALL libsql
+kubectl apply -f libsql-deploy.yaml -n tokenvisor
+
+# INSTALL postgresql
+kubectl apply -f postgres-deployment.yaml
+
+# INSTALL AMD k8s Device Plugin
+kubectl create -f https://raw.githubusercontent.com/ROCm/k8s-device-plugin/master/k8s-ds-amdgpu-dp.yaml
+kubectl create -f https://raw.githubusercontent.com/ROCm/k8s-device-plugin/master/k8s-ds-amdgpu-labeller.yaml
+
+### INSTALL Skypilot API Server (AMD) ###
+kubectl create ns skypilot-amd
+kubectl apply -f skypilot-api-server-deploy-amd.yaml
+
+### Setup seaweedfs for RWX PVC ###
+kubectl create ns seaweedfs
+helm repo add seaweedfs https://seaweedfs.github.io/seaweedfs/helm
+# remember to change the hostPathPrefix in volume
+helm install -n seaweedfs seaweedfs seaweedfs/seaweedfs  -f seaweedfs-values.yaml --version 4.0.402
+helm repo add seaweedfs-csi-driver https://seaweedfs.github.io/seaweedfs-csi-driver/helm
+helm install -n seaweedfs seaweedfs-csi-driver seaweedfs-csi-driver/seaweedfs-csi-driver --set seaweedfsFiler=seaweedfs-filer.seaweedfs.svc:8888 --set mountService.enabled=true --version 0.2.3
+# manual create PVs and PVCs that uses same path.
+# DO NOT NEED to provision the nfs anymore
+kubectl apply -f seaweedfs-skypilot-pv.yaml
+kubectl apply -n skypilot -f seaweedfs-skypilot-pvc.yaml
+kubectl apply -f seaweedfs-tokenvisor-pv.yaml
+kubectl apply -n tokenvisor -f seaweedfs-tokenvisor-pvc.yaml
+
+

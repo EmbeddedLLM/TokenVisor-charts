@@ -1,0 +1,48 @@
+apiVersion: fluentbit.fluent.io/v1alpha2
+kind: FluentBit
+metadata:
+  name: tokenvisor-fluent-bit
+  labels:
+    app.kubernetes.io/instance: fluent-bit-tokenvisor
+    app.kubernetes.io/part-of: fluent-operator
+spec:
+  image: ghcr.io/fluent/fluent-operator/fluent-bit:v4.1
+  positionDB:
+    hostPath:
+      path: /var/lib/fluent-bit/
+  resources:
+    requests:
+      cpu: 10m
+      memory: 25Mi
+    limits:
+      cpu: 500m
+      memory: 200Mi
+  fluentBitConfigName: tokenvisor-fluent-bit-config
+---
+apiVersion: fluentbit.fluent.io/v1alpha2
+kind: ClusterFluentBitConfig
+metadata:
+  name: tokenvisor-fluent-bit-config
+  labels:
+    app.kubernetes.io/instance: fluent-bit-config-tokenvisor
+    app.kubernetes.io/part-of: fluent-operator
+spec:
+  service:
+    parsersFile: /fluent-bit/etc/parsers.conf
+    # parsersFiles: # when there's extra parsers defined
+    #   - /fluent-bit/config/parsers.conf
+  inputSelector:
+    matchLabels:
+      fluentbit.fluent.io/enabled: "true"
+      fluentbit.fluent.io/mode: "k8s"
+      fluentbit.fluent.io/part-of: "tokenvisor"
+  filterSelector:
+    matchLabels:
+      fluentbit.fluent.io/enabled: "true"
+      fluentbit.fluent.io/mode: "k8s"
+      fluentbit.fluent.io/part-of: "tokenvisor"
+  outputSelector:
+    matchLabels:
+      fluentbit.fluent.io/enabled: "true"
+      fluentbit.fluent.io/mode: "k8s"
+      fluentbit.fluent.io/part-of: "tokenvisor"

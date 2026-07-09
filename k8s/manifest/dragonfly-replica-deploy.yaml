@@ -1,0 +1,34 @@
+apiVersion: dragonflydb.io/v1alpha1
+kind: Dragonfly
+metadata:
+  labels:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: dragonfly
+    app.kubernetes.io/part-of: dragonfly-operator
+    app.kubernetes.io/created-by: dragonfly-operator
+  name: dragonfly
+spec:
+  # HA Setup (Uncomment for HA)
+  # replicas: 2
+  # nodeSelector:
+  #   node-role.kubernetes.io/control-plane: "true"
+  # tolerations:
+  #   - key: node-role.kubernetes.io/control-plane
+  #     operator: Exists
+  #     effect: NoSchedule
+  # affinity:
+  #   podAntiAffinity:
+  #     requiredDuringSchedulingIgnoredDuringExecution:
+  #       - labelSelector:
+  #           matchLabels:
+  #             app.kubernetes.io/name: dragonfly
+  #             app.kubernetes.io/part-of: dragonfly
+  #         topologyKey: "kubernetes.io/hostname"
+  replicas: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: 500Mi
+    limits:
+      cpu: 2000m
+      memory: 4000Mi

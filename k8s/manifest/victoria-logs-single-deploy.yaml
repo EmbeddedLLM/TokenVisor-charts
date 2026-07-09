@@ -1,0 +1,40 @@
+server:
+  tag: v1.36.1
+  # HA Setup (Uncomment for HA)
+  # replicaCount: 3
+  replicaCount: 1
+  retentionPeriod: "100y"
+  retentionDiskSpaceUsage: "9GiB"
+  persistentVolume:
+    enabled: true
+    # storageClassName: local-path
+    storageClassName: openebs-three-replica
+    size: 10Gi
+  resources:
+    limits:
+      cpu: 3000m
+      memory: 3000Mi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+  vmServiceScrape:
+    enabled: true
+    extraLabels:
+      scrape-by: vmagent
+  # HA Setup (Uncomment for HA)
+  # nodeSelector:
+  #   node-role.kubernetes.io/control-plane: "true"
+  # tolerations:
+  #   - key: node-role.kubernetes.io/control-plane
+  #     operator: Exists
+  #     effect: NoSchedule
+  # affinity:
+  #   podAntiAffinity:
+  #     requiredDuringSchedulingIgnoredDuringExecution:
+  #       - labelSelector:
+  #           matchExpressions:
+  #             - key: app.kubernetes.io/name
+  #               operator: In
+  #               values:
+  #                 - victoria-logs-single
+  #         topologyKey: "kubernetes.io/hostname"

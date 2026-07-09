@@ -1,0 +1,70 @@
+deployment:
+  mode: single-node
+
+global:
+  minNodesRequired: 1
+
+clickhouse:
+  standalone: true
+  keeperReplicas: 0
+  clusterReplicas: 1
+  initJob:
+    checkClusterCount: false
+
+emu:
+  replicas: 1
+  initWaiter:
+    clickhouse:
+      checkClusterCount: false
+
+studio:
+  replicas: 1
+
+starling:
+  replicas: 1
+  worker:
+    replicas: 1
+  beat:
+    replicas: 1
+
+dragonfly:
+  replicas: 1
+
+victoriametrics:
+  vmagentAgg:
+    replicaCount: 1
+  vmagent:
+    replicaCount: 1
+  vmclusterShortterm:
+    replicationFactor: 1
+    requestsLoadBalancer:
+      enabled: true
+      replicaCount: 1
+    vmstorage:
+      replicaCount: 1
+    vminsert:
+      replicaCount: 1
+  vmcluster:
+    replicationFactor: 1
+    requestsLoadBalancer:
+      enabled: true
+      replicaCount: 1
+    vmstorage:
+      replicaCount: 1
+    vmselect:
+      replicaCount: 1
+    vminsert:
+      replicaCount: 1
+  vmauth:
+    replicaCount: 1
+
+victoria-logs-single:
+  enabled: true
+  fullnameOverride: vls-victoria-logs-single
+  server:
+    replicaCount: 1
+    # VLS is a subchart, so this can't use tokenvisor.haScheduling;
+    # Set to null (not {}) is required — as Helm deep-merges maps, so {} would keep the base values.
+    nodeSelector: null
+    tolerations: []
+    affinity: null

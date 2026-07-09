@@ -1,0 +1,38 @@
+# Get DEVICE_ID by using "ls -l /dev/disk/by-id/"
+# Each DiskPool can only manage 1 single disk
+# ---
+# apiVersion: "openebs.io/v1beta3"
+# kind: DiskPool
+# metadata:
+#   name: disk-pool-NODE_NAME-DEVICE_ID
+#   namespace: openebs
+# spec:
+#   node: NODE_NAME
+#   disks: ["uring:///dev/disk/by-id/DEVICE_ID"]
+---
+apiVersion: "openebs.io/v1beta3"
+kind: DiskPool
+metadata:
+  name: disk-pool-sakura-toktok-4b2d-b
+  namespace: openebs
+spec:
+  node: sakura-toktok
+  disks: ["uring:///dev/disk/by-id/virtio-dfc57425-8962-4b2d-b"]
+---
+apiVersion: "openebs.io/v1beta3"
+kind: DiskPool
+metadata:
+  name: disk-pool-sakura-tiktik-4d6e-b
+  namespace: openebs
+spec:
+  node: sakura-tiktik
+  disks: ["uring:///dev/disk/by-id/virtio-6da23aa9-8652-4d6e-b"]
+---
+apiVersion: "openebs.io/v1beta3"
+kind: DiskPool
+metadata:
+  name: disk-pool-sakura-tungtung-4b750a
+  namespace: openebs
+spec:
+  node: sakura-tungtung
+  disks: ["uring:///dev/disk/by-id/virtio-ea669e41-cfbf-4b75-a"]

@@ -1,0 +1,29 @@
+# CI-specific overrides for the SkyPilot Helm chart.
+# Use alongside skypilot-helm-values.yaml:
+#   helm upgrade --install skypilot skypilot/skypilot --version 0.12.0 \
+#     --namespace skypilot \
+#     -f k8s/manifest/skypilot-helm-values.yaml \
+#     -f k8s/manifest/skypilot-helm-ci-values.yaml
+
+apiService:
+  # Lighter SkyPilot config for CI: no HA, use loadbalancer port mode so
+  # SkyPilot-launched pods get ports reachable from the K3s node.
+  config: |
+    serve:
+      controller:
+        resources:
+          cpus: 2+
+    kubernetes:
+      ports: loadbalancer
+  skipResourceCheck: true
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+
+storage:
+  storageClassName: local-path
+  size: 5Gi

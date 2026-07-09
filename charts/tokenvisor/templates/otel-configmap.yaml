@@ -1,0 +1,74 @@
+{{- $vlValues := index .Values "victoria-logs-single" }}
+{{- $dynamicTargetsEnabled := and .Values.emu.otelCollector.dynamicTargets.enabled .Values.victoriametrics.enabled $vlValues.enabled }}
+{{- $cfg := fromYaml .Values.emu.otelCollector.config }}
+{{- if and $dynamicTargetsEnabled (not $cfg) }}
+{{- fail "emu.otelCollector.config must be valid YAML when dynamic OTEL targets are enabled" }}
+{{- end }}
+{{- if $dynamicTargetsEnabled }}
+{{- $vmPort := int .Values.emu.otelCollector.dynamicTargets.victoriaMetrics.port }}
+{{- $vmPath := .Values.emu.otelCollector.dynamicTargets.victoriaMetrics.path }}
+{{- $vlPort := int .Values.emu.otelCollector.dynamicTargets.victoriaLogs.port }}
+{{- $vlPath := .Values.emu.otelCollector.dynamicTargets.victoriaLogs.path }}
+{{- $configuredVlServiceName := .Values.emu.otelCollector.dynamicTargets.victoriaLogs.serviceName }}
+{{- $derivedVlServiceName := include "tokenvisor.vlServerServiceName" . }}
+{{- if or (not $vmPath) (not $vlPath) (lt $vmPort 1) (lt $vlPort 1) }}
+{{- fail "emu.otelCollector.dynamicTargets.* must define valid VM/VL port and path values" }}
+{{- end }}
+{{- if ne $configuredVlServiceName $derivedVlServiceName }}
+{{- fail (printf "emu.otelCollector.dynamicTargets.victoriaLogs.serviceName must match derived VictoriaLogs service name (%s)" $derivedVlServiceName) }}
+{{- end }}
+{{- $vmHosts := include "tokenvisor.vmagentAggHostsJson" . | fromJsonArray }}
+{{- $vlHosts := include "tokenvisor.vlServerHostsJson" . | fromJsonArray }}
+{{- if or (eq (len $vmHosts) 0) (eq (len $vlHosts) 0) }}
+{{- fail "dynamic OTEL target generation produced an empty VM or VL host list" }}
+{{- end }}
+{{- $exporters := default dict $cfg.exporters }}
+{{- $updatedExporters := dict }}
+{{- range $k, $v := $exporters }}
+{{- if not (or (hasPrefix "otlphttp/victoriametrics" $k) (hasPrefix "otlphttp/vl" $k)) }}
+{{- $_ := set $updatedExporters $k $v }}
+{{- end }}
+{{- end }}
+{{- $metricsExporterNames := list }}
+{{- range $i, $host := $vmHosts }}
+{{- $name := printf "otlphttp/victoriametrics%d" (add1 $i) }}
+{{- $cfgItem := dict "endpoint" (printf "http://%s:%d%s" $host $vmPort $vmPath) "compression" "gzip" "encoding" "proto" }}
+{{- $_ := set $updatedExporters $name $cfgItem }}
+{{- $metricsExporterNames = append $metricsExporterNames $name }}
+{{- end }}
+{{- $logsExporterNames := list }}
+{{- range $i, $host := $vlHosts }}
+{{- $name := printf "otlphttp/vl%d" (add1 $i) }}
+{{- $cfgItem := dict "logs_endpoint" (printf "http://%s.cluster.local:%d%s" $host $vlPort $vlPath) }}
+{{- $_ := set $updatedExporters $name $cfgItem }}
+{{- $logsExporterNames = append $logsExporterNames $name }}
+{{- end }}
+{{- $_ := set $cfg "exporters" $updatedExporters }}
+{{- $service := default dict $cfg.service }}
+{{- $pipelines := default dict $service.pipelines }}
+{{- $metricsPipeline := default dict (index $pipelines "metrics") }}
+{{- $_ := set $metricsPipeline "exporters" $metricsExporterNames }}
+{{- $_ := set $pipelines "metrics" $metricsPipeline }}
+{{- $logsPipeline := default dict (index $pipelines "logs") }}
+{{- $_ := set $logsPipeline "exporters" $logsExporterNames }}
+{{- $_ := set $pipelines "logs" $logsPipeline }}
+{{- $_ := set $service "pipelines" $pipelines }}
+{{- $_ := set $cfg "service" $service }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: {{ include "tokenvisor.namespace" . }}
+  labels:
+    {{- include "tokenvisor.labels" . | nindent 4 }}
+    app: emu
+    app.kubernetes.io/part-of: emu-backend
+
+data:
+  config.yaml: |
+{{- if $dynamicTargetsEnabled }}
+{{- toYaml $cfg | nindent 4 }}
+{{- else }}
+{{- .Values.emu.otelCollector.config | nindent 4 }}
+{{- end }}

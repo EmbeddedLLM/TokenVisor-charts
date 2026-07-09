@@ -1,0 +1,70 @@
+{{- if .Values.network.routes.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Values.network.routes.name }}
+  namespace: {{ include "tokenvisor.namespace" . }}
+  labels:
+    {{- include "tokenvisor.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.network.gateway.name }}
+      namespace: {{ include "tokenvisor.namespace" . }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.network.routes.vmPath }}
+      backendRefs:
+        - name: {{ .Values.network.routes.backends.vmauth.name }}
+          port: {{ .Values.network.routes.backends.vmauth.port | int }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.network.routes.vlPath }}
+      backendRefs:
+        - name: {{ .Values.network.routes.backends.vmauth.name }}
+          port: {{ .Values.network.routes.backends.vmauth.port | int }}
+{{- if and .Values.grafana.enabled .Values.network.routes.grafana.enabled }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.network.routes.grafana.path }}
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: {{ .Values.network.routes.grafana.serviceName }}
+          port: {{ .Values.network.routes.grafana.port | int }}
+          weight: 1
+{{- end }}
+{{- if .Values.network.routes.argocd.enabled }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /argocd
+      backendRefs:
+        - name: {{ .Values.network.routes.argocd.serviceName }}
+          namespace: {{ .Values.network.routes.argocd.namespace }}
+          port: {{ .Values.network.routes.argocd.port | int }}
+          filters:
+            - type: URLRewrite
+              urlRewrite:
+                path:
+                  type: ReplacePrefixMatch
+                  replacePrefixMatch: /
+{{- end }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.network.routes.emuPath }}
+      backendRefs:
+        - name: {{ .Values.emu.service.name }}
+          port: {{ .Values.emu.service.port | int }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.network.routes.studioPath }}
+      backendRefs:
+        - name: {{ .Values.studio.service.name }}
+          port: {{ .Values.studio.service.port | int }}
+{{- end }}

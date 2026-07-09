@@ -1,0 +1,118 @@
+{{- $mode := default "ha" .Values.deployment.mode }}
+{{- $vlValues := index .Values "victoria-logs-single" }}
+{{- if not (has $mode (list "ha" "single-node")) }}
+{{- fail (printf "deployment.mode must be one of: ha, single-node (got %s)" $mode) }}
+{{- end }}
+{{- if lt (int .Values.clickhouse.shardsCount) 1 }}
+{{- fail "clickhouse.shardsCount must be >= 1" }}
+{{- end }}
+{{- if eq $mode "single-node" }}
+{{- if ne (default false .Values.clickhouse.standalone) true }}
+{{- fail "deployment.mode=single-node requires clickhouse.standalone=true" }}
+{{- end }}
+{{- if ne (int .Values.clickhouse.clusterReplicas) 1 }}
+{{- fail "deployment.mode=single-node requires clickhouse.clusterReplicas=1" }}
+{{- end }}
+{{- if ne (int .Values.clickhouse.keeperReplicas) 0 }}
+{{- fail "deployment.mode=single-node requires clickhouse.keeperReplicas=0" }}
+{{- end }}
+{{- if ne .Values.clickhouse.initJob.checkClusterCount false }}
+{{- fail "deployment.mode=single-node requires clickhouse.initJob.checkClusterCount=false" }}
+{{- end }}
+{{- if ne .Values.emu.initWaiter.clickhouse.checkClusterCount false }}
+{{- fail "deployment.mode=single-node requires emu.initWaiter.clickhouse.checkClusterCount=false" }}
+{{- end }}
+{{- if not $vlValues.fullnameOverride }}
+{{- fail "deployment.mode=single-node requires victoria-logs-single.fullnameOverride to be set" }}
+{{- end }}
+{{- if ne (int $vlValues.server.replicaCount) 1 }}
+{{- fail "deployment.mode=single-node requires victoria-logs-single.server.replicaCount=1" }}
+{{- end }}
+{{- if or
+  (ne (int .Values.victoriametrics.vmagentAgg.replicaCount) 1)
+  (ne (int .Values.victoriametrics.vmagent.replicaCount) 1)
+  (ne (int .Values.victoriametrics.vmcluster.replicationFactor) 1)
+  (ne (int .Values.victoriametrics.vmcluster.requestsLoadBalancer.replicaCount) 1)
+  (ne (int .Values.victoriametrics.vmcluster.vmstorage.replicaCount) 1)
+  (ne (int .Values.victoriametrics.vmcluster.vmselect.replicaCount) 1)
+  (ne (int .Values.victoriametrics.vmcluster.vminsert.replicaCount) 1)
+  (ne (int .Values.victoriametrics.vmauth.replicaCount) 1)
+}}
+{{- fail "deployment.mode=single-node requires all Victoriametrics HA replica settings to be 1" }}
+{{- end }}
+{{- end }}
+{{- if and .Values.validation.lookupExistingResources .Values.validation.failOnMissingModelPVC (not .Values.storage.modelPvc.create) }}
+{{- $ns := include "tokenvisor.namespace" . }}
+{{- $pvcName := default .Values.storage.modelPvc.name .Values.emu.modelStorage.existingClaim }}
+{{- if and $pvcName (not (lookup "v1" "PersistentVolumeClaim" $ns $pvcName)) }}
+{{- fail (printf "Required PVC %s not found in namespace %s. Create it, set storage.modelPvc.create=true, or set validation.lookupExistingResources=false for client-side helm template renders." $pvcName $ns) }}
+{{- end }}
+{{- end }}
+{{- if and .Values.validation.lookupExistingResources .Values.validation.failOnMissingStorageClass }}
+{{- $storageClasses := dict }}
+{{- if and .Values.storage.modelPvc.create .Values.storage.modelPvc.storageClassName }}
+{{- $_ := set $storageClasses .Values.storage.modelPvc.storageClassName "storage.modelPvc.storageClassName" }}
+{{- end }}
+{{- if .Values.clickhouse.enabled }}
+{{- $clickhouseStandalone := default false .Values.clickhouse.standalone }}
+{{- $clickhouseKeeperStorageClassName := default .Values.clickhouse.storageClassName .Values.clickhouse.keeper.storageClassName }}
+{{- $clickhouseServerStorageClassName := default .Values.clickhouse.storageClassName .Values.clickhouse.server.storageClassName }}
+{{- if and (not $clickhouseStandalone) $clickhouseKeeperStorageClassName }}
+{{- $_ := set $storageClasses $clickhouseKeeperStorageClassName "clickhouse keeper storageClassName" }}
+{{- end }}
+{{- if $clickhouseServerStorageClassName }}
+{{- $_ := set $storageClasses $clickhouseServerStorageClassName "clickhouse server storageClassName" }}
+{{- end }}
+{{- end }}
+{{- if and .Values.cnpg.enabled .Values.cnpg.storageClassName }}
+{{- $_ := set $storageClasses .Values.cnpg.storageClassName "cnpg.storageClassName" }}
+{{- end }}
+{{- if and .Values.victoriametrics.enabled .Values.victoriametrics.storageClassName }}
+{{- $_ := set $storageClasses .Values.victoriametrics.storageClassName "victoriametrics.storageClassName" }}
+{{- end }}
+{{- if and $vlValues.enabled $vlValues.server.persistentVolume.enabled $vlValues.server.persistentVolume.storageClassName }}
+{{- $_ := set $storageClasses $vlValues.server.persistentVolume.storageClassName "victoria-logs-single.server.persistentVolume.storageClassName" }}
+{{- end }}
+{{- range $storageClassName, $_ := $storageClasses }}
+{{- if not (lookup "storage.k8s.io/v1" "StorageClass" "" $storageClassName) }}
+{{- fail (printf "Required StorageClass %s was not found. Install the storage backend, override the chart storageClassName values, or set validation.lookupExistingResources=false for client-side helm template renders." $storageClassName) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.network.gateway.https.enabled (not .Values.network.gateway.https.tlsSecretName) }}
+{{- fail "network.gateway.https.enabled=true requires network.gateway.https.tlsSecretName to be set (must match the Secret name cert-manager or your TLS provider will create)" }}
+{{- end }}
+{{- if .Values.vmalert.enabled }}
+{{- if not .Values.vmalert.tokenvisorWebhookUrl }}
+{{- fail "vmalert.enabled=true but vmalert.tokenvisorWebhookUrl is empty" }}
+{{- end }}
+{{- if and .Values.vmalert.enableLogRules (not .Values.vmalert.tokenvisorLogWebhookUrl) }}
+{{- fail "vmalert.enableLogRules=true but vmalert.tokenvisorLogWebhookUrl is empty" }}
+{{- end }}
+{{- end }}
+{{- $ns := include "tokenvisor.namespace" . }}
+{{- if and .Values.validation.lookupExistingResources .Values.emu.secret.existingSecret (not .Values.emu.secret.create) }}
+{{- if not (lookup "v1" "Secret" $ns .Values.emu.secret.existingSecret) }}
+{{- fail (printf "Required secret %s not found in namespace %s (set emu.secret.existingSecret or create it first)." .Values.emu.secret.existingSecret $ns) }}
+{{- end }}
+{{- end }}
+{{- if and .Values.validation.lookupExistingResources .Values.studio.secret.existingSecret (not .Values.studio.secret.create) }}
+{{- if not (lookup "v1" "Secret" $ns .Values.studio.secret.existingSecret) }}
+{{- fail (printf "Required secret %s not found in namespace %s (set studio.secret.existingSecret or create it first)." .Values.studio.secret.existingSecret $ns) }}
+{{- end }}
+{{- end }}
+{{- if and .Values.validation.lookupExistingResources .Values.clickhouse.enabled .Values.clickhouse.secrets.existingSecret (not .Values.clickhouse.secrets.create) }}
+{{- if not (lookup "v1" "Secret" $ns .Values.clickhouse.secrets.existingSecret) }}
+{{- fail (printf "Required secret %s not found in namespace %s (set clickhouse.secrets.existingSecret or create it first)." .Values.clickhouse.secrets.existingSecret $ns) }}
+{{- end }}
+{{- end }}
+{{- if and .Values.validation.lookupExistingResources .Values.cnpg.enabled .Values.cnpg.secrets.existingSecret (not .Values.cnpg.secrets.create) }}
+{{- if not (lookup "v1" "Secret" $ns .Values.cnpg.secrets.existingSecret) }}
+{{- fail (printf "Required secret %s not found in namespace %s (set cnpg.secrets.existingSecret or create it first)." .Values.cnpg.secrets.existingSecret $ns) }}
+{{- end }}
+{{- end }}
+{{- if and .Values.validation.lookupExistingResources .Values.victoriametrics.enabled .Values.victoriametrics.vmuser.existingSecret (not .Values.victoriametrics.vmuser.create) }}
+{{- if not (lookup "v1" "Secret" $ns .Values.victoriametrics.vmuser.existingSecret) }}
+{{- fail (printf "Required secret %s not found in namespace %s (set victoriametrics.vmuser.existingSecret or create it first)." .Values.victoriametrics.vmuser.existingSecret $ns) }}
+{{- end }}
+{{- end }}

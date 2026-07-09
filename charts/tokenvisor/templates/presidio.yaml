@@ -1,0 +1,110 @@
+{{- if .Values.presidio.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: presidio-analyzer
+  namespace: {{ include "tokenvisor.namespace" . }}
+  labels:
+    app: presidio-analyzer
+spec:
+  replicas: {{ .Values.presidio.analyzer.replicas }}
+  selector:
+    matchLabels:
+      app: presidio-analyzer
+  template:
+    metadata:
+      labels:
+        app: presidio-analyzer
+    spec:
+      containers:
+        - name: presidio-analyzer
+          image: {{ .Values.presidio.analyzer.image }}
+          imagePullPolicy: {{ .Values.presidio.analyzer.imagePullPolicy }}
+          ports:
+            - containerPort: 3000
+          resources:
+{{ toYaml .Values.presidio.analyzer.resources | indent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: presidio-analyzer
+  namespace: {{ include "tokenvisor.namespace" . }}
+spec:
+  selector:
+    app: presidio-analyzer
+  ports:
+    - port: 3000
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: presidio-anonymizer
+  namespace: {{ include "tokenvisor.namespace" . }}
+  labels:
+    app: presidio-anonymizer
+spec:
+  replicas: {{ .Values.presidio.anonymizer.replicas }}
+  selector:
+    matchLabels:
+      app: presidio-anonymizer
+  template:
+    metadata:
+      labels:
+        app: presidio-anonymizer
+    spec:
+      containers:
+        - name: presidio-anonymizer
+          image: {{ .Values.presidio.anonymizer.image }}
+          imagePullPolicy: {{ .Values.presidio.anonymizer.imagePullPolicy }}
+          ports:
+            - containerPort: 3000
+          resources:
+{{ toYaml .Values.presidio.anonymizer.resources | indent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: presidio-anonymizer
+  namespace: {{ include "tokenvisor.namespace" . }}
+spec:
+  selector:
+    app: presidio-anonymizer
+  ports:
+    - port: 3000
+      targetPort: 3000
+{{- end }}

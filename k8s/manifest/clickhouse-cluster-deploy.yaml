@@ -1,0 +1,232 @@
+apiVersion: "clickhouse-keeper.altinity.com/v1"
+kind: "ClickHouseKeeperInstallation"
+metadata:
+  labels:
+    app.kubernetes.io/instance: chki-tokenvisor
+    app.kubernetes.io/part-of: clickhouse-cluster
+  name: clickhouse-keeper-installation
+spec:
+  configuration:
+    clusters:
+      - name: tv-cluster
+        layout:
+          replicasCount: 3
+    settings:
+      logger/level: "trace"
+      logger/console: "true"
+      listen_host: "0.0.0.0"
+      keeper_server/four_letter_word_white_list: "*"
+      keeper_server/coordination_settings/raft_logs_level: "information"
+      prometheus/endpoint: /metrics
+      prometheus/port: 7000
+      prometheus/metrics: true
+      prometheus/events: true
+      prometheus/asynchronous_metrics: true
+  defaults:
+    templates:
+      podTemplate: clickhouse
+      dataVolumeClaimTemplate: clickhouse
+  templates:
+    podTemplates:
+      - name: clickhouse
+        metadata:
+          labels:
+            app: clickhouse-keeper
+            app.kubernetes.io/instance: chk-tokenvisor
+            app.kubernetes.io/part-of: clickhouse-cluster
+          name: clickhouse-keeper
+          annotations:
+            config.linkerd.io/proxy-preserve-ip: "true"
+            prometheus.io/port: "7000"
+            prometheus.io/scrape: "true"
+        spec:
+          # HA Setup (Uncomment for HA)
+          # nodeSelector:
+          #   node-role.kubernetes.io/control-plane: "true"
+          # tolerations:
+          #   - key: node-role.kubernetes.io/control-plane
+          #     operator: Exists
+          #     effect: NoSchedule
+          # affinity:
+          #   podAntiAffinity:
+          #     requiredDuringSchedulingIgnoredDuringExecution:
+          #       - labelSelector:
+          #           matchExpressions:
+          #             - key: "app"
+          #               operator: In
+          #               values:
+          #                 - clickhouse-keeper
+          #         topologyKey: "kubernetes.io/hostname"
+          containers:
+            - name: clickhouse-keeper
+              imagePullPolicy: IfNotPresent
+              image: clickhouse/clickhouse-keeper:26.3
+              ports:
+                - name: chk-metrics
+                  containerPort: 7000 # update acccording to the metrics port
+              resources:
+                requests:
+                  memory: "256M"
+                  cpu: "350m"
+                limits:
+                  memory: "4Gi"
+                  cpu: "2"
+          securityContext:
+            fsGroup: 101
+
+    volumeClaimTemplates:
+      - name: clickhouse
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          # storageClassName: local-path
+          storageClassName: openebs-three-replica
+          resources:
+            requests:
+              storage: 10Gi
+---
+apiVersion: "clickhouse.altinity.com/v1"
+kind: "ClickHouseInstallation"
+metadata:
+  labels:
+    app.kubernetes.io/instance: chi-tokenvisor
+    app.kubernetes.io/part-of: clickhouse-cluster
+  name: tokenvisor
+spec:
+  configuration:
+    users:
+      clickhouse_operator/networks/ip: "10.0.0.0/8"
+      emuuser/networks/ip: "::/0"
+      emuuser/profile: default
+      emuuser/quota: default
+      emuuser/access_management: 1
+      emuuser/password:
+        valueFrom:
+          secretKeyRef:
+            name: clickhouse-secret
+            key: db_user_password
+    profiles:
+      default/allow_experimental_time_series_table: 1
+      default/allow_experimental_json_type: 1
+    settings:
+      prometheus/endpoint: /metrics
+      prometheus/port: 9363
+      prometheus/metrics: true
+      prometheus/events: true
+      prometheus/asynchronous_metrics: true
+      logger/level: "trace"
+      logger/console: "true"
+      logger/size: "100M"
+      logger/count: 10
+      listen_host: "0.0.0.0"
+    files:
+      conf.d/log_ttl_setup.xml: |
+        <clickhouse>
+          <text_log>
+            <ttl>event_date + INTERVAL 45 day</ttl>
+          </text_log>
+          <processors_profile_log>
+            <ttl>event_date + INTERVAL 45 day</ttl>
+          </processors_profile_log>
+          <metric_log>
+            <ttl>event_date + INTERVAL 45 day</ttl>
+          </metric_log>
+          <asynchronous_metric_log>
+            <ttl>event_date + INTERVAL 45 day</ttl>
+          </asynchronous_metric_log>
+          <trace_log>
+            <ttl>event_date + INTERVAL 45 day</ttl>
+          </trace_log>
+          <part_log>
+            <ttl>event_date + INTERVAL 45 day</ttl>
+          </part_log>
+        </clickhouse>
+    zookeeper:
+      nodes:
+        - host: chk-clickhouse-keeper-installation-tv-cluster-0-0.tokenvisor.svc.cluster.local
+          port: 2181
+        - host: chk-clickhouse-keeper-installation-tv-cluster-0-1.tokenvisor.svc.cluster.local
+          port: 2181
+        - host: chk-clickhouse-keeper-installation-tv-cluster-0-2.tokenvisor.svc.cluster.local
+          port: 2181
+      session_timeout_ms: 30000
+      operation_timeout_ms: 10000
+    clusters:
+      - name: tv-cluster
+        layout:
+          replicasCount: 3
+        secret:
+          valueFrom:
+            secretKeyRef:
+              name: clickhouse-secret
+              key: cluster_secret
+        templates:
+          podTemplate: clickhouse-with-volume
+
+  templates:
+    podTemplates:
+      - name: clickhouse-with-volume
+        metadata:
+          labels:
+            app: clickhouse-cluster
+            app.kubernetes.io/instance: ch-tokenvisor
+            app.kubernetes.io/part-of: clickhouse-cluster
+          annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/path: "/metrics"
+            prometheus.io/port: "9363"
+        spec:
+          # HA Setup (Uncomment for HA)
+          # nodeSelector:
+          #   node-role.kubernetes.io/control-plane: "true"
+          # tolerations:
+          #   - key: node-role.kubernetes.io/control-plane
+          #     operator: Exists
+          #     effect: NoSchedule
+          # affinity:
+          #   podAntiAffinity:
+          #     requiredDuringSchedulingIgnoredDuringExecution:
+          #       - labelSelector:
+          #           matchExpressions:
+          #             - key: "app"
+          #               operator: In
+          #               values:
+          #                 - clickhouse-cluster
+          #         topologyKey: "kubernetes.io/hostname"
+          containers:
+            - name: clickhouse
+              image: clickhouse/clickhouse-server:26.3
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CLICKHOUSE_ALWAYS_RUN_INITDB_SCRIPTS
+                  value: "1"
+                - name: CLICKHOUSE_DB
+                  value: tokenvisor_emu
+              volumeMounts:
+                - mountPath: /var/lib/clickhouse
+                  name: clickhouse-cluster-pvc
+          securityContext:
+            fsGroup: 101
+    volumeClaimTemplates:
+      - name: clickhouse-cluster-pvc
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          # storageClassName: local-path
+          storageClassName: openebs-three-replica
+          resources:
+            requests:
+              storage: 10Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    app.kubernetes.io/instance: clickhouse-secret-tokenvisor
+    app.kubernetes.io/part-of: clickhouse-cluster
+  name: clickhouse-secret
+type: Opaque
+stringData:
+  cluster_secret: tokenvisoremucluster
+  db_user_password: emupassword
+  db_readonly_user_password: emureadonlypassword

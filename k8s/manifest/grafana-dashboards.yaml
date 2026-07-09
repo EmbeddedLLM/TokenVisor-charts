@@ -1,0 +1,120 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: dragonfly-dashboard
+  namespace: dragonfly-operator-system
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  configMapRef:
+    name: dashboard-dragonfly-operator-grafana-dashboard
+    key: grafana-dashboard.json
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: grafana-dashboard
+  namespace: grafana-operator-system
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  configMapRef:
+    name: grafana-operator-dashboard
+    key: grafana-dashboard.json
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: cnpg-dashboard
+  namespace: cnpg-operator-system
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  configMapRef:
+    name: cnpg-grafana-dashboard
+    key: cnp.json
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: clickhouse-operator-dashboard
+  namespace: clickhouse-operator-system
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  configMapRef:
+    name: clickhouse-operator-altinity-clickhouse-operator-dashboards
+    key: Altinity_ClickHouse_Operator_dashboard.json
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: clickhouse-keeper-dashboard
+  namespace: clickhouse-operator-system
+spec:
+  resyncPeriod: 24h
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  url: https://raw.githubusercontent.com/Altinity/clickhouse-operator/master/grafana-dashboard/ClickHouseKeeper_dashboard.json
+  allowCrossNamespaceImport: true
+  datasources:
+    - inputName: DS_PROMETHEUS
+      datasourceName: tokenvisor-vm-prometheus
+  # somehow the dashboard from helm doesn't work
+  # configMapRef:
+  #   name: clickhouse-operator-altinity-clickhouse-operator-dashboards
+  #   key: ClickHouseKeeper_dashboard.json
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: clickhouse-queries-dashboard
+  namespace: clickhouse-operator-system
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  configMapRef:
+    name: clickhouse-operator-altinity-clickhouse-operator-dashboards
+    key: ClickHouse_Queries_dashboard.json
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: vmagent-dashboard
+  namespace: tokenvisor
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  url: "https://grafana.com/api/dashboards/12683/revisions/23/download"
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: vlogs-dashboard
+  namespace: tokenvisor
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  url: "https://grafana.com/api/dashboards/22084/revisions/5/download"

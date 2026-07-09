@@ -1,0 +1,124 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: ImageCatalog
+metadata:
+  name: postgresql
+spec:
+  images:
+    - major: 17
+      image: ghcr.io/cloudnative-pg/postgresql:17.6-202510060807-standard-trixie
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: tokenvisor-postgresql-cluster
+  labels:
+    app.kubernetes.io/instance: cnpg-tokenvisor
+    app.kubernetes.io/part-of: cnpg-cluster
+spec:
+  # HA Setup (Uncomment for HA)
+  # instances: 3
+  instances: 1
+  # HA Setup (Uncomment for HA)
+  # affinity:
+  #   nodeSelector:
+  #     node-role.kubernetes.io/control-plane: "true"
+  #   tolerations:
+  #     - key: node-role.kubernetes.io/control-plane
+  #       operator: Exists
+  #       effect: NoSchedule
+  #   additionalPodAntiAffinity:
+  #     requiredDuringSchedulingIgnoredDuringExecution:
+  #       - labelSelector:
+  #           matchExpressions:
+  #             - key: cnpg.io/podRole
+  #               operator: In
+  #               values:
+  #                 - instance
+  #         topologyKey: "kubernetes.io/hostname"
+  imageCatalogRef:
+    apiGroup: postgresql.cnpg.io
+    kind: ImageCatalog
+    name: postgresql
+    major: 17
+  managed:
+    roles:
+      - name: tokenvisor_auditor
+        ensure: present
+        comment: pgaudit role for tokenvisor
+        login: false
+  postgresql:
+    parameters:
+      # pgaudit for logging ddl and delete statements
+      pgaudit.log: "ddl, role" # log DDL and ROLE related statement
+      pgaudit.log_catalog: "off"
+      pgaudit.log_parameter: "on" # include parameters for prepared stmts
+      pgaudit.log_client: "on" # include client addr/port in audit line
+      pgaudit.role: "tokenvisor_auditor" # use object based auditing for tokenvisor tables (need extra steps, create role/grant privileges)
+      max_connections: "100" # Max allowed connections
+      deadlock_timeout: "5s" # Time before checking for deadlocks (default: 1s), set to 5s based on Amir recommendation
+  bootstrap:
+    initdb:
+      database: emu
+      owner: emupg
+      secret:
+        name: pg-emu-user-secret
+  monitoring:
+    enablePodMonitor: true
+  storage:
+    pvcTemplate:
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+      # storageClassName: local-path
+      storageClassName: openebs-three-replica
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: tokenvisor-pgbouncer
+spec:
+  cluster:
+    name: tokenvisor-postgresql-cluster
+  # HA Setup (Uncomment for HA)
+  # instances: 3
+  instances: 1
+  # HA Setup (Uncomment for HA)
+  # template:
+  #   spec:
+  #     containers: []
+  #     nodeSelector:
+  #       node-role.kubernetes.io/control-plane: "true"
+  #     tolerations:
+  #       - key: node-role.kubernetes.io/control-plane
+  #         operator: Exists
+  #         effect: NoSchedule
+  #     affinity:
+  #       podAntiAffinity:
+  #         requiredDuringSchedulingIgnoredDuringExecution:
+  #           - labelSelector:
+  #               matchExpressions:
+  #                 - key: cnpg.io/podRole
+  #                   operator: In
+  #                   values:
+  #                     - pooler
+  #             topologyKey: "kubernetes.io/hostname"
+  type: rw
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      max_client_conn: "1000"
+      default_pool_size: "80"
+  monitoring:
+    enablePodMonitor: true
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pg-emu-user-secret
+type: kubernetes.io/basic-auth
+stringData:
+  username: emupg
+  password: emupg
+---

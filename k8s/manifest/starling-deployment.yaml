@@ -1,0 +1,171 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: tokenvisor
+  name: starling-worker
+  labels:
+    app: starling-worker
+spec:
+  # HA Setup (Uncomment for HA)
+  # replicas: 3
+  # strategy:
+  #   type: RollingUpdate
+  #   rollingUpdate:
+  #     maxSurge: 0
+  #     maxUnavailable: 1
+  replicas: 1
+  selector:
+    matchLabels:
+      app: starling-worker
+  template:
+    metadata:
+      labels:
+        app: starling-worker
+        app.kubernetes.io/part-of: emu-backend
+    spec:
+      # HA Setup (Uncomment for HA)
+      # nodeSelector:
+      #   node-role.kubernetes.io/control-plane: "true"
+      # tolerations:
+      #   - key: node-role.kubernetes.io/control-plane
+      #     operator: Exists
+      #     effect: NoSchedule
+      # affinity:
+      #   podAntiAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       - labelSelector:
+      #           matchLabels:
+      #             app: starling-worker
+      #         topologyKey: "kubernetes.io/hostname"
+      imagePullSecrets:
+        - name: github-registry-secret
+      containers:
+        - name: starling-worker
+          image: ghcr.io/embeddedllm/tokenvisor-emu:latest
+          imagePullPolicy: Always
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              uv run --no-sync celery -A emu.entrypoints.starling worker --loglevel=info --max-memory-per-child 32768 --autoscale=4,2
+          envFrom:
+            - configMapRef:
+                name: emu-config
+            - secretRef:
+                name: emu-secret
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "1Gi"
+          volumeMounts:
+            - name: model-storage
+              mountPath: /hf_repo
+        # OpenTelemetry Collector sidecar
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.113.0
+          args: ["--config=/etc/otelcol/config.yaml"]
+          ports:
+            - name: metrics
+              containerPort: 8889
+          volumeMounts:
+            - name: otel-config
+              mountPath: /etc/otelcol/config.yaml
+              subPath: config.yaml
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+      volumes:
+        - name: otel-config
+          configMap:
+            name: otel-collector-config
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: nfs-model-storage-pvc
+      serviceAccount: emu
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: tokenvisor
+  name: starling-beat
+  labels:
+    app: starling-beat
+spec:
+  # HA Setup (Uncomment for HA)
+  # replicas: 3
+  # strategy:
+  #   type: RollingUpdate
+  #   rollingUpdate:
+  #     maxSurge: 0
+  #     maxUnavailable: 1
+  replicas: 1
+  selector:
+    matchLabels:
+      app: starling-beat
+  template:
+    metadata:
+      labels:
+        app: starling-beat
+        app.kubernetes.io/part-of: emu-backend
+    spec:
+      # HA Setup (Uncomment for HA)
+      # nodeSelector:
+      #   node-role.kubernetes.io/control-plane: "true"
+      # tolerations:
+      #   - key: node-role.kubernetes.io/control-plane
+      #     operator: Exists
+      #     effect: NoSchedule
+      # affinity:
+      #   podAntiAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       - labelSelector:
+      #           matchLabels:
+      #             app: starling-beat
+      #         topologyKey: "kubernetes.io/hostname"
+      imagePullSecrets:
+        - name: github-registry-secret
+      containers:
+        - name: starling-beat
+          image: ghcr.io/embeddedllm/tokenvisor-emu:latest
+          imagePullPolicy: Always
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              uv run --no-sync celery -A emu.entrypoints.starling beat --loglevel=info -S redbeat.RedBeatScheduler
+          envFrom:
+            - configMapRef:
+                name: emu-config
+            - secretRef:
+                name: emu-secret
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+        # OpenTelemetry Collector sidecar
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.113.0
+          args: ["--config=/etc/otelcol/config.yaml"]
+          ports:
+            - name: metrics
+              containerPort: 8889
+          volumeMounts:
+            - name: otel-config
+              mountPath: /etc/otelcol/config.yaml
+              subPath: config.yaml
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+      volumes:
+        - name: otel-config
+          configMap:
+            name: otel-collector-config
+      serviceAccount: emu

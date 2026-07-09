@@ -1,0 +1,32 @@
+replicaCount: 2
+crds:
+  cleanup:
+    enabled: true
+serviceMonitor:
+  enabled: true
+  extraLabels:
+    scrape-by: vmagent
+resources:
+  limits:
+    cpu: 500m
+    memory: 500Mi
+  requests:
+    cpu: 100m
+    memory: 150Mi
+# HA Setup (Uncomment for HA)
+# nodeSelector:
+#   node-role.kubernetes.io/control-plane: "true"
+# tolerations:
+#   - key: node-role.kubernetes.io/control-plane
+#     operator: Exists
+#     effect: NoSchedule
+# affinity:
+#   podAntiAffinity:
+#     requiredDuringSchedulingIgnoredDuringExecution:
+#       - labelSelector:
+#           matchExpressions:
+#             - key: app.kubernetes.io/name
+#               operator: In
+#               values:
+#                 - victoria-metrics-operator
+#         topologyKey: "kubernetes.io/hostname"

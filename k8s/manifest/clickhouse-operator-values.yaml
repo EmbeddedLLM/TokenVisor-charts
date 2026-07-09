@@ -1,0 +1,33 @@
+configs:
+  files:
+    config.yaml:
+      watch:
+        namespaces:
+          - tokenvisor
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    scrape-by: vmagent
+dashboards:
+  enabled: true
+  additionalLabels:
+    grafana_dashboard: "clickhouse"
+  annotations: {}
+  grafana_folder: clickhouse
+# HA Setup (Uncomment for HA)
+# nodeSelector:
+#   node-role.kubernetes.io/control-plane: "true"
+# tolerations:
+#   - key: node-role.kubernetes.io/control-plane
+#     operator: Exists
+#     effect: NoSchedule
+# affinity:
+#   podAntiAffinity:
+#     requiredDuringSchedulingIgnoredDuringExecution:
+#       - labelSelector:
+#           matchExpressions:
+#             - key: app.kubernetes.io/name
+#               operator: In
+#               values:
+#                 - clickhouse-operator
+#         topologyKey: "kubernetes.io/hostname"

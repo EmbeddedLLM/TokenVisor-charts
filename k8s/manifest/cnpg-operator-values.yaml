@@ -1,0 +1,24 @@
+replicaCount: 2
+monitoring:
+  podMonitorEnabled: true
+  podMonitorAdditionalLabels:
+    scrape-by: vmagent
+  grafanaDashboard:
+    create: true
+# HA Setup (Uncomment for HA)
+# nodeSelector:
+#   node-role.kubernetes.io/control-plane: "true"
+# tolerations:
+#   - key: node-role.kubernetes.io/control-plane
+#     operator: Exists
+#     effect: NoSchedule
+# affinity:
+#   podAntiAffinity:
+#     requiredDuringSchedulingIgnoredDuringExecution:
+#       - labelSelector:
+#           matchExpressions:
+#             - key: app.kubernetes.io/name
+#               operator: In
+#               values:
+#                 - cloudnative-pg
+#         topologyKey: "kubernetes.io/hostname"

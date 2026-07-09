@@ -1,0 +1,1737 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CHART_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LOCAL_DIR="${CHART_DIR}/.local"
+SECRETS_FILE="${LOCAL_DIR}/tokenvisor-secrets.yaml"
+TOKENVISOR_NAMESPACE="${TOKENVISOR_NAMESPACE:-tokenvisor}"
+SKYPILOT_NAMESPACE="${SKYPILOT_NAMESPACE:-skypilot}"
+REGISTRY_SECRET_NAME="${REGISTRY_SECRET_NAME:-registry-secret}"
+GHCR_SERVER="${GHCR_SERVER:-ghcr.io}"
+TOKENVISOR_MODE="${TOKENVISOR_MODE:-ha}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./bin/tokenvisor-prereqs check
+  ./bin/tokenvisor-prereqs platform [--apply] [--yes] [--include-grafana] [--include-fluent]
+  ./bin/tokenvisor-prereqs storage check
+  ./bin/tokenvisor-prereqs storage local-path [--apply] [--yes]
+  ./bin/tokenvisor-prereqs storage model-pvcs [--apply] [--yes] [--path PATH] [--size SIZE]
+  ./bin/tokenvisor-prereqs gpu check
+  ./bin/tokenvisor-prereqs gpu nvidia [--apply] [--yes] [--namespace NAMESPACE]
+  ./bin/tokenvisor-prereqs gpu amd [--apply] [--yes] [--namespace NAMESPACE]
+  ./bin/tokenvisor-prereqs skypilot [--apply] [--yes] [--storage-class NAME|--sc NAME] [--image IMAGE] [--version VERSION]
+  ./bin/tokenvisor-prereqs create-namespaces [--apply]
+  ./bin/tokenvisor-prereqs secrets init [--force] [--interactive]
+  ./bin/tokenvisor-prereqs secrets apply
+  ./bin/tokenvisor-prereqs secrets ghcr [--apply] [--yes]
+
+Commands that mutate the cluster require --apply. Without --apply, commands review
+the planned action or render local files only.
+
+Environment:
+  TOKENVISOR_NAMESPACE   TokenVisor namespace (default: tokenvisor)
+  SKYPILOT_NAMESPACE     SkyPilot namespace (default: skypilot)
+  TOKENVISOR_MODE        ha or single-node for check output (default: ha)
+  REGISTRY_SECRET_NAME   Image pull secret name (default: registry-secret)
+  GHCR_USERNAME          GitHub username for secrets ghcr
+  GHCR_TOKEN             GitHub token for secrets ghcr
+  GHCR_EMAIL             Optional email for secrets ghcr
+  NVIDIA_GPU_NAMESPACE   NVIDIA GPU Operator namespace (default: gpu-operator)
+  AMD_GPU_NAMESPACE      AMD GPU Operator namespace (default: amd-gpu-operator)
+EOF
+}
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+info() {
+  echo "==> $*"
+}
+
+warn() {
+  echo "WARN: $*" >&2
+}
+
+random_hex() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 24
+    return 0
+  fi
+  od -An -N24 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+yaml_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "${value}"
+}
+
+url_percent_encode() {
+  local value="$1"
+  local encoded=""
+  local i char
+  local LC_ALL=C
+
+  for ((i = 0; i < ${#value}; i++)); do
+    char="${value:i:1}"
+    case "${char}" in
+      [a-zA-Z0-9.~_-])
+        encoded+="${char}"
+        ;;
+      *)
+        printf -v encoded '%s%%%02X' "${encoded}" "'${char}"
+        ;;
+    esac
+  done
+
+  printf '%s' "${encoded}"
+}
+
+current_context() {
+  kubectl config current-context 2>/dev/null || echo unknown
+}
+
+require_tool() {
+  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+ensure_local_dir() {
+  mkdir -p "${LOCAL_DIR}"
+}
+
+kubectl_ok() {
+  kubectl "$@" >/dev/null 2>&1
+}
+
+helm_release_exists() {
+  local release_name="$1"
+  local namespace="$2"
+
+  helm status "${release_name}" -n "${namespace}" >/dev/null 2>&1
+}
+
+check_item() {
+  local label="$1"
+  shift
+
+  if "$@"; then
+    printf "ok   %s\n" "${label}"
+  else
+    printf "miss %s\n" "${label}"
+    return 1
+  fi
+}
+
+check_optional_item() {
+  local label="$1"
+  shift
+
+  if "$@"; then
+    printf "ok   %s (optional)\n" "${label}"
+  else
+    printf "miss %s (optional)\n" "${label}"
+  fi
+}
+
+check_tool_item() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+check_crd() {
+  kubectl_ok get crd "$1"
+}
+
+check_namespace() {
+  kubectl_ok get namespace "$1"
+}
+
+check_secret() {
+  kubectl_ok -n "${TOKENVISOR_NAMESPACE}" get secret "$1"
+}
+
+check_secret_key() {
+  local secret_name="$1"
+  local key="$2"
+
+  kubectl get secret "${secret_name}" \
+    -n "${TOKENVISOR_NAMESPACE}" \
+    -o "jsonpath={.data.${key}}" 2>/dev/null | grep -q .
+}
+
+check_registry_secret() {
+  kubectl_ok -n "$1" get secret "${REGISTRY_SECRET_NAME}"
+}
+
+check_model_pvc() {
+  kubectl_ok -n "${TOKENVISOR_NAMESPACE}" get pvc nfs-model-storage-pvc
+}
+
+check_skypilot_model_pvc() {
+  kubectl_ok -n "${SKYPILOT_NAMESPACE}" get pvc nfs-model-storage-pvc
+}
+
+check_seaweedfs_csi_driver() {
+  kubectl_ok get csidriver seaweedfs-csi-driver
+}
+
+check_local_path_storage_class() {
+  kubectl_ok get storageclass local-path
+}
+
+check_skypilot_service() {
+  kubectl_ok -n "${SKYPILOT_NAMESPACE}" get service skypilot-api-service
+}
+
+check_grafana_secret() {
+  check_secret_key grafana-secret admin_password
+}
+
+check_chart_dependency() {
+  compgen -G "${CHART_DIR}/charts/victoria-logs-single*" >/dev/null
+}
+
+check_mode() {
+  case "${TOKENVISOR_MODE}" in
+    ha|single-node)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+check_node_count() {
+  local min_nodes=3
+  local count
+
+  case "${TOKENVISOR_MODE}" in
+    ha)
+      min_nodes=3
+      ;;
+    single-node)
+      min_nodes=1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  count="$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+  [ "${count:-0}" -ge "${min_nodes}" ]
+}
+
+check_ha_mode() {
+  [ "${TOKENVISOR_MODE}" = "ha" ]
+}
+
+confirm_apply() {
+  local description="$1"
+  local assume_yes="$2"
+  local context
+  local answer
+
+  context="$(current_context)"
+  info "Kubernetes context: ${context}"
+
+  if [ "${assume_yes}" -eq 1 ]; then
+    return 0
+  fi
+
+  if [ ! -t 0 ]; then
+    die "${description} mutates the cluster; rerun with --yes in non-interactive environments"
+  fi
+
+  printf 'Apply %s to context "%s"? Type "yes" to continue: ' "${description}" "${context}" >&2
+  read -r answer
+  if [ "${answer}" != "yes" ]; then
+    info "No changes applied."
+    exit 0
+  fi
+}
+
+run_check() {
+  local failed=0
+
+  check_item "kubectl command" check_tool_item kubectl || failed=1
+  check_item "helm command" check_tool_item helm || failed=1
+  check_item "TOKENVISOR_MODE is ha or single-node" check_mode || failed=1
+  check_item "victoria-logs-single chart dependency" check_chart_dependency || failed=1
+
+  if command -v kubectl >/dev/null 2>&1; then
+    info "Kubernetes context: $(kubectl config current-context 2>/dev/null || echo unknown)"
+    check_item "node count for ${TOKENVISOR_MODE} mode" check_node_count || failed=1
+    check_item "namespace/${TOKENVISOR_NAMESPACE}" check_namespace "${TOKENVISOR_NAMESPACE}" || failed=1
+    check_item "namespace/${SKYPILOT_NAMESPACE}" check_namespace "${SKYPILOT_NAMESPACE}" || failed=1
+    check_item "Gateway API GatewayClass CRD" check_crd gatewayclasses.gateway.networking.k8s.io || failed=1
+    check_item "Gateway API Gateway CRD" check_crd gateways.gateway.networking.k8s.io || failed=1
+    check_item "Gateway API HTTPRoute CRD" check_crd httproutes.gateway.networking.k8s.io || failed=1
+    check_item "GatewayClass/cilium" kubectl_ok get gatewayclass cilium || failed=1
+
+    check_item "ServiceMonitor CRD" check_crd servicemonitors.monitoring.coreos.com || failed=1
+    check_item "PodMonitor CRD" check_crd podmonitors.monitoring.coreos.com || failed=1
+    check_item "VictoriaMetrics VMAgent CRD" check_crd vmagents.operator.victoriametrics.com || failed=1
+    check_item "VictoriaMetrics VMAuth CRD" check_crd vmauths.operator.victoriametrics.com || failed=1
+    check_item "VictoriaMetrics VMCluster CRD" check_crd vmclusters.operator.victoriametrics.com || failed=1
+    check_item "VictoriaMetrics VMUser CRD" check_crd vmusers.operator.victoriametrics.com || failed=1
+    check_item "VictoriaMetrics VMNodeScrape CRD" check_crd vmnodescrapes.operator.victoriametrics.com || failed=1
+    check_item "VictoriaMetrics VMPodScrape CRD" check_crd vmpodscrapes.operator.victoriametrics.com || failed=1
+    check_item "Dragonfly CRD" check_crd dragonflies.dragonflydb.io || failed=1
+    check_item "ClickHouseInstallation CRD" check_crd clickhouseinstallations.clickhouse.altinity.com || failed=1
+    if check_ha_mode; then
+      check_item "ClickHouseKeeperInstallation CRD" check_crd clickhousekeeperinstallations.clickhouse-keeper.altinity.com || failed=1
+    fi
+    check_item "CNPG ImageCatalog CRD" check_crd imagecatalogs.postgresql.cnpg.io || failed=1
+    check_item "CNPG Cluster CRD" check_crd clusters.postgresql.cnpg.io || failed=1
+    check_item "CNPG Pooler CRD" check_crd poolers.postgresql.cnpg.io || failed=1
+
+    check_item "model PVC nfs-model-storage-pvc" check_model_pvc || failed=1
+    check_item "secret/clickhouse-secret" check_secret clickhouse-secret || failed=1
+    check_item "secret/clickhouse-secret key cluster_secret" check_secret_key clickhouse-secret cluster_secret || failed=1
+    check_item "secret/clickhouse-secret key db_user_password" check_secret_key clickhouse-secret db_user_password || failed=1
+    check_item "secret/clickhouse-secret key db_readonly_user_password" check_secret_key clickhouse-secret db_readonly_user_password || failed=1
+    check_item "secret/pg-emu-user-secret" check_secret pg-emu-user-secret || failed=1
+    check_item "secret/pg-emu-user-secret key username" check_secret_key pg-emu-user-secret username || failed=1
+    check_item "secret/pg-emu-user-secret key password" check_secret_key pg-emu-user-secret password || failed=1
+    check_item "secret/vmuser-secret" check_secret vmuser-secret || failed=1
+    check_item "secret/vmuser-secret key password" check_secret_key vmuser-secret password || failed=1
+    check_item "secret/emu-secret" check_secret emu-secret || failed=1
+    check_item "secret/emu-secret key EMU_DB_PATH" check_secret_key emu-secret EMU_DB_PATH || failed=1
+    check_item "secret/emu-secret key EMU_SERVICE_KEY" check_secret_key emu-secret EMU_SERVICE_KEY || failed=1
+    check_item "secret/studio-secret" check_secret studio-secret || failed=1
+    check_item "secret/studio-secret key STUDIO_AUTH_SECRET" check_secret_key studio-secret STUDIO_AUTH_SECRET || failed=1
+    check_item "GHCR pull secret in ${TOKENVISOR_NAMESPACE}" check_registry_secret "${TOKENVISOR_NAMESPACE}" || failed=1
+    check_item "SkyPilot API service" check_skypilot_service || failed=1
+
+    printf '\nOptional:\n'
+    check_optional_item "StorageClass/local-path" check_local_path_storage_class
+    check_optional_item "SeaweedFS CSI driver" check_seaweedfs_csi_driver
+    check_optional_item "model PVC in ${SKYPILOT_NAMESPACE}" check_skypilot_model_pvc
+    check_optional_item "Grafana Operator CRD" check_crd grafanas.grafana.integreatly.org
+    check_optional_item "Grafana admin secret" check_grafana_secret
+    check_optional_item "Fluent Bit CRD" check_crd fluentbits.fluentbit.fluent.io
+    check_optional_item "FluentBit ClusterInput CRD" check_crd clusterinputs.fluentbit.fluent.io
+    check_optional_item "FluentBit ClusterFilter CRD" check_crd clusterfilters.fluentbit.fluent.io
+    check_optional_item "FluentBit ClusterOutput CRD" check_crd clusteroutputs.fluentbit.fluent.io
+    check_optional_item "FluentBit ClusterFluentBitConfig CRD" check_crd clusterfluentbitconfigs.fluentbit.fluent.io
+    check_optional_item "NVIDIA GPU Operator/runtime pods" has_nvidia_gpu_pods
+    check_optional_item "AMD GPU Operator/runtime pods" has_amd_gpu_pods
+  fi
+
+  if [ "${failed}" -ne 0 ]; then
+    cat <<EOF
+
+See:
+  docs/OPERATORS.md
+  docs/STORAGE.md
+  docs/SECRETS.md
+  docs/SKYPILOT.md
+EOF
+    die "preflight check found missing prerequisites"
+  fi
+}
+
+namespace_manifest() {
+  local namespace="$1"
+  kubectl create namespace "${namespace}" --dry-run=client -o yaml
+}
+
+apply_namespace() {
+  namespace_manifest "$1" | kubectl apply -f -
+}
+
+apply_namespaces_from_manifest() {
+  local manifest="$1"
+  local namespace
+
+  while IFS= read -r namespace; do
+    [ -n "${namespace}" ] || continue
+    apply_namespace "${namespace}"
+  done < <(
+    kubectl apply \
+      --dry-run=client \
+      -f "${manifest}" \
+      -o 'jsonpath={.metadata.namespace}{"\n"}{range .items[*]}{.metadata.namespace}{"\n"}{end}' \
+      | sed '/^$/d' \
+      | sort -u
+  )
+}
+
+apply_gateway_api_crds() {
+  info "Applying Gateway API CRDs"
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/standard/gateway.networking.k8s.io_gatewayclasses.yaml
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/standard/gateway.networking.k8s.io_gateways.yaml
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/standard/gateway.networking.k8s.io_httproutes.yaml
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/standard/gateway.networking.k8s.io_referencegrants.yaml
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/standard/gateway.networking.k8s.io_grpcroutes.yaml
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/experimental/gateway.networking.k8s.io_tlsroutes.yaml
+}
+
+ensure_cilium_gateway_class() {
+  if kubectl_ok get gatewayclass cilium; then
+    info "GatewayClass/cilium already exists"
+    return 0
+  fi
+
+  if ! kubectl -n kube-system get pods -l k8s-app=cilium --no-headers 2>/dev/null | grep -q .; then
+    warn "Cilium pods were not detected; skipping GatewayClass/cilium creation"
+    warn "Install/enable Cilium Gateway support, then create GatewayClass/cilium if needed"
+    return 0
+  fi
+
+  info "Creating GatewayClass/cilium"
+  kubectl apply -f - <<'YAML'
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: cilium
+spec:
+  controllerName: io.cilium/gateway-controller
+YAML
+}
+
+apply_monitoring_crds() {
+  info "Applying ServiceMonitor/PodMonitor CRDs"
+  kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.87.1/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
+  kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.87.1/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml
+}
+
+write_platform_values() {
+  ensure_local_dir
+
+  cat > "${LOCAL_DIR}/vm-operator-values.yaml" <<'YAML'
+replicaCount: 1
+crds:
+  cleanup:
+    enabled: true
+serviceMonitor:
+  enabled: true
+  extraLabels:
+    scrape-by: vmagent
+resources:
+  limits:
+    cpu: 500m
+    memory: 500Mi
+  requests:
+    cpu: 100m
+    memory: 150Mi
+YAML
+
+  cat > "${LOCAL_DIR}/dragonfly-operator-values.yaml" <<'YAML'
+replicaCount: 1
+manager:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 200Mi
+    limits:
+      cpu: 1000m
+      memory: 2000Mi
+serviceMonitor:
+  enabled: true
+  labels:
+    scrape-by: vmagent
+grafanaDashboard:
+  enabled: true
+  folder: dragonfly
+  annotations:
+    name: dragonfly_folder
+  labels:
+    name: dragonfly_dashboard
+YAML
+
+  cat > "${LOCAL_DIR}/clickhouse-operator-values.yaml" <<YAML
+configs:
+  files:
+    config.yaml:
+      watch:
+        namespaces:
+          - ${TOKENVISOR_NAMESPACE}
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    scrape-by: vmagent
+dashboards:
+  enabled: true
+  additionalLabels:
+    grafana_dashboard: "clickhouse"
+  annotations: {}
+  grafana_folder: clickhouse
+YAML
+
+  cat > "${LOCAL_DIR}/cnpg-operator-values.yaml" <<'YAML'
+replicaCount: 1
+monitoring:
+  podMonitorEnabled: true
+  podMonitorAdditionalLabels:
+    scrape-by: vmagent
+  grafanaDashboard:
+    create: true
+YAML
+
+  cat > "${LOCAL_DIR}/grafana-operator-values.yaml" <<'YAML'
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    scrape-by: vmagent
+dashboard:
+  enabled: true
+YAML
+}
+
+install_vm_operator() {
+  info "Installing VictoriaMetrics operator"
+  apply_namespace vm-operator-system
+
+  if helm_release_exists vmoperator vm-operator-system; then
+    info "VictoriaMetrics operator release already exists; skipping install"
+    return 0
+  fi
+
+  helm repo add vm https://victoriametrics.github.io/helm-charts/ --force-update
+  helm repo update vm
+  helm install vmoperator vm/victoria-metrics-operator \
+    -f "${LOCAL_DIR}/vm-operator-values.yaml" \
+    -n vm-operator-system \
+    --set serviceMonitor.enabled=false \
+    --version 0.62.1
+  helm upgrade vmoperator vm/victoria-metrics-operator \
+    -f "${LOCAL_DIR}/vm-operator-values.yaml" \
+    -n vm-operator-system \
+    --version 0.62.1
+}
+
+install_dragonfly_operator() {
+  info "Installing Dragonfly operator"
+  apply_namespace dragonfly-operator-system
+
+  if helm_release_exists dragonfly-operator dragonfly-operator-system; then
+    info "Dragonfly operator release already exists; skipping install"
+    return 0
+  fi
+
+  helm upgrade --install dragonfly-operator \
+    oci://ghcr.io/dragonflydb/dragonfly-operator/helm/dragonfly-operator \
+    -f "${LOCAL_DIR}/dragonfly-operator-values.yaml" \
+    -n dragonfly-operator-system \
+    --version v1.1.10
+
+  info "Patching Dragonfly operator metrics bind address"
+  if kubectl patch deployment dragonfly-operator \
+    -n dragonfly-operator-system \
+    --type='json' \
+    -p='[
+      {
+        "op": "replace",
+        "path": "/spec/template/spec/containers/1/args/1",
+        "value": "--metrics-bind-address=0.0.0.0:8080"
+      }
+    ]'; then
+    info "Dragonfly operator metrics patch applied"
+  else
+    warn "Dragonfly operator metrics patch failed; inspect deployment args manually"
+  fi
+}
+
+install_clickhouse_operator() {
+  info "Installing ClickHouse operator"
+  apply_namespace clickhouse-operator-system
+
+  if helm_release_exists clickhouse-operator clickhouse-operator-system; then
+    info "ClickHouse operator release already exists; skipping install"
+    return 0
+  fi
+
+  helm repo add clickhouse-operator https://docs.altinity.com/clickhouse-operator/ --force-update
+  helm repo update clickhouse-operator
+  helm upgrade --install clickhouse-operator \
+    clickhouse-operator/altinity-clickhouse-operator \
+    -f "${LOCAL_DIR}/clickhouse-operator-values.yaml" \
+    -n clickhouse-operator-system \
+    --version 0.27.0
+}
+
+install_cnpg_operator() {
+  info "Installing CloudNativePG operator"
+  apply_namespace cnpg-operator-system
+
+  if helm_release_exists cnpg cnpg-operator-system; then
+    info "CloudNativePG operator release already exists; skipping install"
+    return 0
+  fi
+
+  helm repo add cnpg https://cloudnative-pg.github.io/charts --force-update
+  helm repo update cnpg
+  helm upgrade --install cnpg \
+    cnpg/cloudnative-pg \
+    -f "${LOCAL_DIR}/cnpg-operator-values.yaml" \
+    -n cnpg-operator-system \
+    --version 0.27.1
+}
+
+install_grafana_operator() {
+  info "Installing Grafana operator"
+  apply_namespace grafana-operator-system
+
+  if helm_release_exists grafana-operator grafana-operator-system; then
+    info "Grafana operator release already exists; skipping install"
+    return 0
+  fi
+
+  helm upgrade --install grafana-operator \
+    oci://ghcr.io/grafana/helm-charts/grafana-operator \
+    -f "${LOCAL_DIR}/grafana-operator-values.yaml" \
+    -n grafana-operator-system \
+    --version v5.17.0
+}
+
+install_fluent_operator() {
+  info "Installing Fluent operator"
+  apply_namespace fluent-operator-system
+
+  if helm_release_exists fluent-operator fluent-operator-system; then
+    info "Fluent operator release already exists; skipping install"
+    return 0
+  fi
+
+  helm repo add fluent https://fluent.github.io/helm-charts --force-update
+  helm repo update fluent
+  helm upgrade --install fluent-operator fluent/fluent-operator \
+    -n fluent-operator-system \
+    --set containerRuntime=containerd \
+    --set Kubernetes=false
+}
+
+platform_plan() {
+  local include_grafana="$1"
+  local include_fluent="$2"
+
+  cat <<EOF
+Platform will:
+  - create namespaces: ${TOKENVISOR_NAMESPACE}, ${SKYPILOT_NAMESPACE}
+  - apply Gateway API CRDs
+  - create GatewayClass/cilium only when Cilium pods are detected and the class is missing
+  - apply ServiceMonitor and PodMonitor CRDs
+  - write operator values under .local/
+  - install missing required operators:
+      VictoriaMetrics Operator 0.62.1
+      Dragonfly Operator v1.1.10
+      ClickHouse Operator 0.27.0
+      CloudNativePG 0.27.1
+  - patch Dragonfly operator metrics binding to 0.0.0.0:8080 only on first install
+EOF
+
+  if [ "${include_grafana}" -eq 1 ]; then
+    cat <<'EOF'
+  - install missing optional Grafana Operator v5.17.0
+EOF
+  fi
+  if [ "${include_fluent}" -eq 1 ]; then
+    cat <<'EOF'
+  - install missing optional Fluent Operator
+EOF
+  fi
+
+  cat <<'EOF'
+Run with --apply to execute.
+EOF
+}
+
+run_platform() {
+  local apply=0
+  local assume_yes=0
+  local include_grafana=0
+  local include_fluent=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply)
+        apply=1
+        ;;
+      --yes|-y)
+        assume_yes=1
+        ;;
+      --dry-run)
+        apply=0
+        ;;
+      --include-grafana)
+        include_grafana=1
+        ;;
+      --include-fluent)
+        include_fluent=1
+        ;;
+      *)
+        die "unknown platform option: $1"
+        ;;
+    esac
+    shift
+  done
+
+  if [ "${apply}" -ne 1 ]; then
+    platform_plan "${include_grafana}" "${include_fluent}"
+    return 0
+  fi
+
+  require_tool kubectl
+  require_tool helm
+  confirm_apply "platform prerequisites (CRDs/operators/namespaces)" "${assume_yes}"
+
+  info "Creating required namespaces"
+  apply_namespace "${TOKENVISOR_NAMESPACE}"
+  apply_namespace "${SKYPILOT_NAMESPACE}"
+
+  apply_gateway_api_crds
+  ensure_cilium_gateway_class
+  apply_monitoring_crds
+  write_platform_values
+  install_vm_operator
+  install_dragonfly_operator
+  install_clickhouse_operator
+  install_cnpg_operator
+  if [ "${include_grafana}" -eq 1 ]; then
+    install_grafana_operator
+  fi
+  if [ "${include_fluent}" -eq 1 ]; then
+    install_fluent_operator
+  fi
+
+  info "Platform phase completed. Run: ./bin/tokenvisor-prereqs check"
+}
+
+render_seaweedfs_model_storage() {
+  local model_path="$1"
+  local size="$2"
+  local output="${LOCAL_DIR}/seaweedfs-model-storage.yaml"
+
+  ensure_local_dir
+  cat > "${output}" <<YAML
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: seaweedfs-tokenvisor-pv
+spec:
+  accessModes: [ReadWriteMany]
+  capacity:
+    storage: ${size}
+  csi:
+    driver: seaweedfs-csi-driver
+    volumeHandle: seaweedfs-tokenvisor-pv-id
+    volumeAttributes:
+      collection: default
+      replication: "000"
+      path: ${model_path}
+      concurrentReaders: "128"
+  persistentVolumeReclaimPolicy: Retain
+  volumeMode: Filesystem
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-model-storage-pvc
+  namespace: ${TOKENVISOR_NAMESPACE}
+spec:
+  storageClassName: ""
+  volumeName: seaweedfs-tokenvisor-pv
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: ${size}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: seaweedfs-skypilot-pv
+spec:
+  accessModes: [ReadWriteMany]
+  capacity:
+    storage: ${size}
+  csi:
+    driver: seaweedfs-csi-driver
+    volumeHandle: seaweedfs-skypilot-pv-id
+    volumeAttributes:
+      collection: default
+      replication: "000"
+      path: ${model_path}
+      concurrentReaders: "128"
+  persistentVolumeReclaimPolicy: Retain
+  volumeMode: Filesystem
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-model-storage-pvc
+  namespace: ${SKYPILOT_NAMESPACE}
+spec:
+  storageClassName: ""
+  volumeName: seaweedfs-skypilot-pv
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: ${size}
+YAML
+
+  info "Wrote ${output}"
+  warn "For SeaweedFS CSI static PVs, ${size} is Kubernetes binding metadata, not a hard storage quota."
+}
+
+run_storage_check() {
+  local failed=0
+
+  check_item "model PVC in ${TOKENVISOR_NAMESPACE}" check_model_pvc || failed=1
+  check_item "model PVC in ${SKYPILOT_NAMESPACE}" check_skypilot_model_pvc || failed=1
+
+  printf '\nOptional storage helpers:\n'
+  check_optional_item "StorageClass/local-path" check_local_path_storage_class
+  check_optional_item "SeaweedFS CSI driver" check_seaweedfs_csi_driver
+
+  if [ "${failed}" -ne 0 ]; then
+    cat <<EOF
+
+See:
+  docs/STORAGE.md
+  docs/SEAWEEDFS.md
+
+Notes:
+  - This helper does not install OpenEBS.
+  - This helper does not install SeaweedFS yet; use docs/SEAWEEDFS.md first.
+EOF
+    die "storage check found missing prerequisites"
+  fi
+}
+
+run_storage_local_path() {
+  local apply=0
+  local assume_yes=0
+  local manifest_url="https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.34/deploy/local-path-storage.yaml"
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply)
+        apply=1
+        ;;
+      --yes|-y)
+        assume_yes=1
+        ;;
+      --dry-run)
+        apply=0
+        ;;
+      *)
+        die "unknown storage local-path option: $1"
+        ;;
+    esac
+    shift
+  done
+
+  if [ "${apply}" -ne 1 ]; then
+    cat <<EOF
+Storage local-path will:
+  - skip if StorageClass/local-path already exists
+  - otherwise install Rancher local-path-provisioner v0.0.34
+  - create StorageClass/local-path without marking it as default
+
+Manifest:
+  ${manifest_url}
+
+Run with --apply to execute.
+EOF
+    return 0
+  fi
+
+  require_tool kubectl
+  if kubectl_ok get storageclass local-path; then
+    info "StorageClass/local-path already exists; skipping local-path-provisioner install"
+    return 0
+  fi
+
+  confirm_apply "storage local-path prerequisites" "${assume_yes}"
+  kubectl apply -f "${manifest_url}"
+}
+
+run_storage_model_pvcs() {
+  local apply=0
+  local assume_yes=0
+  local model_path="/shared_hf_repo"
+  local size="20Gi"
+  local output="${LOCAL_DIR}/seaweedfs-model-storage.yaml"
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply)
+        apply=1
+        ;;
+      --yes|-y)
+        assume_yes=1
+        ;;
+      --dry-run)
+        apply=0
+        ;;
+      --path)
+        shift
+        [ -n "${1:-}" ] || die "--path requires a value"
+        model_path="$1"
+        ;;
+      --size)
+        shift
+        [ -n "${1:-}" ] || die "--size requires a value"
+        size="$1"
+        ;;
+      *)
+        die "unknown storage model-pvcs option: $1"
+        ;;
+    esac
+    shift
+  done
+
+  render_seaweedfs_model_storage "${model_path}" "${size}"
+  if [ "${apply}" -ne 1 ]; then
+    info "Rendered ${output}. Run with --apply to create/update PVs and PVCs."
+    return 0
+  fi
+
+  require_tool kubectl
+  confirm_apply "storage model PV/PVC manifests" "${assume_yes}"
+  apply_namespace "${TOKENVISOR_NAMESPACE}"
+  apply_namespace "${SKYPILOT_NAMESPACE}"
+  kubectl apply -f "${output}"
+}
+
+run_storage() {
+  local subcommand="${1:-}"
+  shift || true
+
+  case "${subcommand}" in
+    check)
+      run_storage_check "$@"
+      ;;
+    local-path)
+      run_storage_local_path "$@"
+      ;;
+    model-pvcs)
+      run_storage_model_pvcs "$@"
+      ;;
+    ""|help|-h|--help)
+      cat <<'EOF'
+Storage commands:
+  ./bin/tokenvisor-prereqs storage check
+  ./bin/tokenvisor-prereqs storage local-path [--apply] [--yes]
+  ./bin/tokenvisor-prereqs storage model-pvcs [--apply] [--yes] [--path PATH] [--size SIZE]
+
+Notes:
+  - OpenEBS is not installed by this helper.
+  - SeaweedFS is not installed by this helper yet; use docs/SEAWEEDFS.md.
+  - model-pvcs assumes SeaweedFS CSI is already installed.
+EOF
+      ;;
+    *)
+      die "unknown storage subcommand: ${subcommand}"
+      ;;
+  esac
+}
+
+list_nvidia_gpu_pods() {
+  kubectl get pods -A \
+    -o 'jsonpath={range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | grep -E '/(gpu-operator|nvidia-gpu-operator|gpu-operator-node-feature-discovery|gpu-feature-discovery|nvidia-container-toolkit-daemonset|nvidia-cuda-validator|nvidia-dcgm-exporter|nvidia-device-plugin-daemonset|nvidia-mig-manager|nvidia-operator-validator)(-|$)' \
+    || true
+}
+
+list_amd_gpu_pods() {
+  kubectl get pods -A \
+    -o 'jsonpath={range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | grep -E '/(amd-gpu-operator|amd-device-plugin|amd-metrics-exporter)(-|$)' \
+    || true
+}
+
+has_nvidia_gpu_pods() {
+  [ -n "$(list_nvidia_gpu_pods)" ]
+}
+
+has_amd_gpu_pods() {
+  [ -n "$(list_amd_gpu_pods)" ]
+}
+
+run_gpu_check() {
+  local nvidia_pods
+  local amd_pods
+
+  [ "$#" -eq 0 ] || die "unknown gpu check option: $1"
+  require_tool kubectl
+
+  nvidia_pods="$(list_nvidia_gpu_pods)"
+  if [ -n "${nvidia_pods}" ]; then
+    printf "ok   NVIDIA GPU Operator/runtime pods detected\n"
+    printf "%s\n" "${nvidia_pods}" | sed 's/^/     /'
+  else
+    printf "miss NVIDIA GPU Operator/runtime pods\n"
+  fi
+
+  amd_pods="$(list_amd_gpu_pods)"
+  if [ -n "${amd_pods}" ]; then
+    printf "ok   AMD GPU Operator/runtime pods detected\n"
+    printf "%s\n" "${amd_pods}" | sed 's/^/     /'
+  else
+    printf "miss AMD GPU Operator/runtime pods\n"
+  fi
+
+  cat <<'EOF'
+
+GPU setup is conditional. Install the vendor path only if SkyPilot will run GPU workloads on that GPU type.
+See docs/GPU.md for node/runtime prerequisites.
+EOF
+}
+
+run_gpu_nvidia() {
+  local apply=0
+  local assume_yes=0
+  local namespace="${NVIDIA_GPU_NAMESPACE:-gpu-operator}"
+  local release_name="gpu-operator"
+  local existing_pods
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply)
+        apply=1
+        ;;
+      --yes|-y)
+        assume_yes=1
+        ;;
+      --dry-run)
+        apply=0
+        ;;
+      --namespace)
+        shift
+        [ -n "${1:-}" ] || die "--namespace requires a value"
+        namespace="$1"
+        ;;
+      *)
+        die "unknown gpu nvidia option: $1"
+        ;;
+    esac
+    shift
+  done
+
+  require_tool kubectl
+  existing_pods="$(list_nvidia_gpu_pods)"
+  if [ -n "${existing_pods}" ]; then
+    info "NVIDIA GPU Operator/runtime pods already exist; skipping install."
+    printf "%s\n" "${existing_pods}" | sed 's/^/  /'
+    return 0
+  fi
+
+  if [ "${apply}" -ne 1 ]; then
+    cat <<EOF
+GPU NVIDIA will:
+  - install NVIDIA GPU Operator with Helm release ${release_name}
+  - use namespace ${namespace}
+  - set driver.enabled=false
+  - set toolkit.enabled=false
+  - set migManager.enabled=false
+
+This assumes NVIDIA drivers/runtime prerequisites are already handled by the node image or cluster distro.
+Run with --apply to execute.
+EOF
+    return 0
+  fi
+
+  require_tool helm
+  confirm_apply "NVIDIA GPU operator prerequisites" "${assume_yes}"
+  helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --force-update
+  helm repo update nvidia
+  helm upgrade --install "${release_name}" nvidia/gpu-operator \
+    --namespace "${namespace}" \
+    --create-namespace \
+    --set driver.enabled=false \
+    --set toolkit.enabled=false \
+    --set migManager.enabled=false
+}
+
+render_amd_metrics_exporter_config() {
+  local namespace="$1"
+
+  cat <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: amd-metrics-exporter-config
+  namespace: ${namespace}
+data:
+  config.json: |
+    {
+      "GPUConfig": {
+        "Fields": [
+          "GPU_PACKAGE_POWER",
+          "GPU_JUNCTION_TEMPERATURE",
+          "GPU_MEMORY_TEMPERATURE",
+          "GPU_GFX_ACTIVITY",
+          "GPU_UMC_ACTIVITY",
+          "PCIE_SPEED",
+          "PCIE_MAX_SPEED",
+          "PCIE_BANDWIDTH",
+          "GPU_ENERGY_CONSUMED",
+          "GPU_CLOCK",
+          "GPU_TOTAL_VRAM",
+          "GPU_FREE_VRAM",
+          "GPU_USED_VRAM"
+        ],
+        "Labels": [
+          "GPU_UUID",
+          "SERIAL_NUMBER",
+          "GPU_ID",
+          "CARD_SERIES",
+          "CARD_MODEL",
+          "CARD_VENDOR",
+          "DRIVER_VERSION",
+          "VBIOS_VERSION",
+          "HOSTNAME"
+        ]
+      }
+    }
+YAML
+}
+
+write_amd_metrics_exporter_config() {
+  local namespace="$1"
+  local output="${LOCAL_DIR}/amd-metrics-exporter-config.yaml"
+
+  ensure_local_dir
+  render_amd_metrics_exporter_config "${namespace}" > "${output}"
+  info "Wrote ${output}"
+}
+
+run_gpu_amd() {
+  local apply=0
+  local assume_yes=0
+  local namespace="${AMD_GPU_NAMESPACE:-amd-gpu-operator}"
+  local existing_pods
+  local output="${LOCAL_DIR}/amd-metrics-exporter-config.yaml"
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply)
+        apply=1
+        ;;
+      --yes|-y)
+        assume_yes=1
+        ;;
+      --dry-run)
+        apply=0
+        ;;
+      --namespace)
+        shift
+        [ -n "${1:-}" ] || die "--namespace requires a value"
+        namespace="$1"
+        ;;
+      *)
+        die "unknown gpu amd option: $1"
+        ;;
+    esac
+    shift
+  done
+
+  require_tool kubectl
+  existing_pods="$(list_amd_gpu_pods)"
+  if [ -n "${existing_pods}" ]; then
+    info "AMD GPU Operator/runtime pods already exist; skipping install."
+    printf "%s\n" "${existing_pods}" | sed 's/^/  /'
+    return 0
+  fi
+
+  if [ "${apply}" -ne 1 ]; then
+    cat <<EOF
+GPU AMD will:
+  - install cert-manager v1.17.2
+  - create namespace ${namespace}
+  - write and apply ${output}
+  - install AMD GPU Operator with Helm release amd-gpu-operator
+  - set deviceConfig.spec.testRunner.enable=true
+  - set deviceConfig.spec.metricsExporter.config.name=amd-metrics-exporter-config
+
+Run with --apply to execute.
+EOF
+    return 0
+  fi
+
+  require_tool helm
+  confirm_apply "AMD GPU operator prerequisites" "${assume_yes}"
+  write_amd_metrics_exporter_config "${namespace}"
+  helm repo add jetstack https://charts.jetstack.io --force-update
+  helm upgrade --install cert-manager jetstack/cert-manager \
+    --namespace cert-manager \
+    --create-namespace \
+    --version v1.17.2 \
+    --set crds.enabled=true
+
+  apply_namespace "${namespace}"
+  kubectl apply -f "${output}"
+
+  helm repo add rocm https://rocm.github.io/gpu-operator --force-update
+  helm repo update rocm
+  helm upgrade --install amd-gpu-operator rocm/gpu-operator-charts \
+    --namespace "${namespace}" \
+    --set deviceConfig.spec.testRunner.enable=true \
+    --set deviceConfig.spec.metricsExporter.config.name=amd-metrics-exporter-config
+}
+
+run_gpu() {
+  local subcommand="${1:-}"
+  shift || true
+
+  case "${subcommand}" in
+    check)
+      run_gpu_check "$@"
+      ;;
+    nvidia)
+      run_gpu_nvidia "$@"
+      ;;
+    amd)
+      run_gpu_amd "$@"
+      ;;
+    ""|help|-h|--help)
+      cat <<'EOF'
+GPU commands:
+  ./bin/tokenvisor-prereqs gpu check
+  ./bin/tokenvisor-prereqs gpu nvidia [--apply] [--yes] [--namespace NAMESPACE]
+  ./bin/tokenvisor-prereqs gpu amd [--apply] [--yes] [--namespace NAMESPACE]
+
+Notes:
+  - GPU setup is conditional; use it only when SkyPilot will run GPU workloads.
+  - NVIDIA install is skipped when NVIDIA GPU Operator/runtime pods already exist anywhere.
+  - AMD install is skipped when AMD GPU Operator/runtime pods already exist anywhere.
+EOF
+      ;;
+    *)
+      die "unknown gpu subcommand: ${subcommand}"
+      ;;
+  esac
+}
+
+render_skypilot_values() {
+  local storage_class="$1"
+  local image="$2"
+  local output="${LOCAL_DIR}/skypilot-values.yaml"
+
+  ensure_local_dir
+  cat > "${output}" <<YAML
+apiService:
+  image: ${image}
+  config: |
+    serve:
+      controller:
+        resources:
+          cloud: kubernetes
+          cpus: 4+
+          disk_size: 50
+        high_availability: true
+    kubernetes:
+      ports: podip
+      high_availability:
+        storage_class_name: ${storage_class}
+  resources:
+    requests:
+      cpu: "4"
+      memory: "8Gi"
+  serveServerLog: false
+
+storage:
+  storageClassName: ${storage_class}
+
+ingress:
+  enabled: false
+
+ingress-nginx:
+  enabled: false
+YAML
+
+  info "Wrote ${output}"
+}
+
+run_skypilot() {
+  local apply=0
+  local assume_yes=0
+  local namespace="${SKYPILOT_NAMESPACE}"
+  local release_name="skypilot"
+  local chart_version="0.12.0"
+  local storage_class="openebs-three-replica"
+  local image="ghcr.io/embeddedllm/skypilot:v0.12.0"
+  local output="${LOCAL_DIR}/skypilot-values.yaml"
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply)
+        apply=1
+        ;;
+      --yes|-y)
+        assume_yes=1
+        ;;
+      --dry-run)
+        apply=0
+        ;;
+      --namespace)
+        shift
+        [ -n "${1:-}" ] || die "--namespace requires a value"
+        namespace="$1"
+        ;;
+      --release)
+        shift
+        [ -n "${1:-}" ] || die "--release requires a value"
+        release_name="$1"
+        ;;
+      --storage-class|--sc)
+        shift
+        [ -n "${1:-}" ] || die "--storage-class requires a value"
+        storage_class="$1"
+        ;;
+      --image)
+        shift
+        [ -n "${1:-}" ] || die "--image requires a value"
+        image="$1"
+        ;;
+      --version)
+        shift
+        [ -n "${1:-}" ] || die "--version requires a value"
+        chart_version="$1"
+        ;;
+      *)
+        die "unknown skypilot option: $1"
+        ;;
+    esac
+    shift
+  done
+
+  render_skypilot_values "${storage_class}" "${image}"
+
+  if [ "${apply}" -ne 1 ]; then
+    cat <<EOF
+SkyPilot will:
+  - install upstream chart skypilot/skypilot version ${chart_version}
+  - use Helm release ${release_name}
+  - use namespace ${namespace}
+  - use API image ${image}
+  - use storage class ${storage_class}
+
+Values:
+  ${output}
+
+Run with --apply to execute.
+EOF
+    return 0
+  fi
+
+  require_tool kubectl
+  require_tool helm
+  confirm_apply "SkyPilot prerequisites" "${assume_yes}"
+
+  apply_namespace "${namespace}"
+
+  if ! kubectl_ok get storageclass "${storage_class}"; then
+    warn "StorageClass/${storage_class} was not found; SkyPilot PVCs may stay Pending"
+  fi
+
+  helm repo add skypilot https://helm.skypilot.co --force-update
+  helm repo update skypilot
+  helm upgrade --install "${release_name}" skypilot/skypilot \
+    --namespace "${namespace}" \
+    -f "${output}" \
+    --version "${chart_version}"
+}
+
+run_create_namespaces() {
+  require_tool kubectl
+
+  case "${1:-}" in
+    --apply)
+      namespace_manifest "${TOKENVISOR_NAMESPACE}" | kubectl apply -f -
+      namespace_manifest "${SKYPILOT_NAMESPACE}" | kubectl apply -f -
+      ;;
+    ""|--dry-run)
+      namespace_manifest "${TOKENVISOR_NAMESPACE}"
+      echo "---"
+      namespace_manifest "${SKYPILOT_NAMESPACE}"
+      warn "dry run only; pass --apply to create/update namespaces"
+      ;;
+    *)
+      die "unknown create-namespaces option: $1"
+      ;;
+  esac
+}
+
+prompt_secret_value() {
+  local label="$1"
+  local default_value="$2"
+  local value
+
+  printf '%s [press Enter to use generated value]: ' "${label}" >&2
+  read -rs value
+  printf '\n' >&2
+  if [ -z "${value}" ]; then
+    value="${default_value}"
+  fi
+  printf '%s' "${value}"
+}
+
+prompt_optional_secret_value() {
+  local label="$1"
+  local value
+
+  printf '%s [press Enter to skip]: ' "${label}" >&2
+  read -r value
+  printf '\n' >&2
+  printf '%s' "${value}"
+}
+
+render_interactive_secrets() {
+  local clickhouse_cluster_secret="$1"
+  local clickhouse_user_password="$2"
+  local clickhouse_readonly_password="$3"
+  local emupg_password="$4"
+  local vmuser_password="$5"
+  local emu_service_key="$6"
+  local studio_auth_secret="$7"
+  local grafana_admin_password="$8"
+  local openai_api_key="$9"
+  local huggingface_api_key="${10}"
+  local openrouter_api_key="${11}"
+  local anthropic_api_key="${12}"
+  local cerebras_api_key="${13}"
+  local cohere_api_key="${14}"
+  local gemini_api_key="${15}"
+  local groq_api_key="${16}"
+  local hyperbolic_api_key="${17}"
+  local jina_ai_api_key="${18}"
+  local sambanova_api_key="${19}"
+  local together_ai_api_key="${20}"
+  local voyage_api_key="${21}"
+  local resend_api_key="${22}"
+  local emupg_password_urlencoded
+
+  emupg_password_urlencoded="$(url_percent_encode "${emupg_password}")"
+
+  cat > "${SECRETS_FILE}" <<YAML
+# TokenVisor secrets generated by:
+#   ./bin/tokenvisor-prereqs secrets init --interactive
+#
+# Keep this file out of git.
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clickhouse-secret
+  namespace: ${TOKENVISOR_NAMESPACE}
+type: Opaque
+stringData:
+  cluster_secret: $(yaml_quote "${clickhouse_cluster_secret}")
+  db_user_password: $(yaml_quote "${clickhouse_user_password}")
+  db_readonly_user_password: $(yaml_quote "${clickhouse_readonly_password}")
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pg-emu-user-secret
+  namespace: ${TOKENVISOR_NAMESPACE}
+type: kubernetes.io/basic-auth
+stringData:
+  username: "emupg"
+  password: $(yaml_quote "${emupg_password}")
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vmuser-secret
+  namespace: ${TOKENVISOR_NAMESPACE}
+type: Opaque
+stringData:
+  password: $(yaml_quote "${vmuser_password}")
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: emu-secret
+  namespace: ${TOKENVISOR_NAMESPACE}
+type: Opaque
+stringData:
+  EMU_DB_PATH: $(yaml_quote "postgresql+psycopg://emupg:${emupg_password_urlencoded}@tokenvisor-pgbouncer.${TOKENVISOR_NAMESPACE}.svc.cluster.local:5432/emu")
+  EMU_SERVICE_KEY: $(yaml_quote "${emu_service_key}")
+  EMU_OPENAI_API_KEY: $(yaml_quote "${openai_api_key}")
+  EMU_HUGGINGFACE_API_KEY: $(yaml_quote "${huggingface_api_key}")
+  EMU_OPENROUTER_API_KEY: $(yaml_quote "${openrouter_api_key}")
+  EMU_ANTHROPIC_API_KEY: $(yaml_quote "${anthropic_api_key}")
+  EMU_CEREBRAS_API_KEY: $(yaml_quote "${cerebras_api_key}")
+  EMU_COHERE_API_KEY: $(yaml_quote "${cohere_api_key}")
+  EMU_GEMINI_API_KEY: $(yaml_quote "${gemini_api_key}")
+  EMU_GROQ_API_KEY: $(yaml_quote "${groq_api_key}")
+  EMU_HYPERBOLIC_API_KEY: $(yaml_quote "${hyperbolic_api_key}")
+  EMU_JINA_AI_API_KEY: $(yaml_quote "${jina_ai_api_key}")
+  EMU_SAMBANOVA_API_KEY: $(yaml_quote "${sambanova_api_key}")
+  EMU_TOGETHER_AI_API_KEY: $(yaml_quote "${together_ai_api_key}")
+  EMU_VOYAGE_API_KEY: $(yaml_quote "${voyage_api_key}")
+  EMU_RESEND_API_KEY: $(yaml_quote "${resend_api_key}")
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: studio-secret
+  namespace: ${TOKENVISOR_NAMESPACE}
+type: Opaque
+stringData:
+  STUDIO_AUTH_SECRET: $(yaml_quote "${studio_auth_secret}")
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-secret
+  namespace: ${TOKENVISOR_NAMESPACE}
+type: Opaque
+stringData:
+  admin_password: $(yaml_quote "${grafana_admin_password}")
+YAML
+}
+
+secrets_init_interactive() {
+  local clickhouse_cluster_secret
+  local clickhouse_user_password
+  local clickhouse_readonly_password
+  local emupg_password
+  local vmuser_password
+  local emu_service_key
+  local studio_auth_secret
+  local grafana_admin_password
+  local openai_api_key=""
+  local huggingface_api_key=""
+  local openrouter_api_key=""
+  local anthropic_api_key=""
+  local cerebras_api_key=""
+  local cohere_api_key=""
+  local gemini_api_key=""
+  local groq_api_key=""
+  local hyperbolic_api_key=""
+  local jina_ai_api_key=""
+  local sambanova_api_key=""
+  local together_ai_api_key=""
+  local voyage_api_key=""
+  local resend_api_key=""
+
+  if [ ! -t 0 ]; then
+    die "secrets init --interactive requires an interactive terminal"
+  fi
+
+  info "Generating required secrets for namespace ${TOKENVISOR_NAMESPACE}"
+  info "Internal secret/password prompts are hidden, following standard password-entry practice."
+  info "Press Enter at each internal prompt to use a generated value."
+
+  clickhouse_cluster_secret="$(prompt_secret_value "ClickHouse cluster secret" "$(random_hex)")"
+  clickhouse_user_password="$(prompt_secret_value "ClickHouse emuuser password" "$(random_hex)")"
+  clickhouse_readonly_password="$(prompt_secret_value "ClickHouse readonly password" "$(random_hex)")"
+  emupg_password="$(prompt_secret_value "Postgres emupg password" "$(random_hex)")"
+  vmuser_password="$(prompt_secret_value "VictoriaMetrics vmuser password" "$(random_hex)")"
+  emu_service_key="$(prompt_secret_value "EMU service key" "$(random_hex)")"
+  studio_auth_secret="$(prompt_secret_value "Studio auth secret" "$(random_hex)")"
+  grafana_admin_password="$(prompt_secret_value "Grafana admin password" "$(random_hex)")"
+
+  info "Provider API keys are optional and visible while typing for paste verification. Press Enter to leave a key empty."
+  openai_api_key="$(prompt_optional_secret_value "EMU_OPENAI_API_KEY")"
+  huggingface_api_key="$(prompt_optional_secret_value "EMU_HUGGINGFACE_API_KEY")"
+  openrouter_api_key="$(prompt_optional_secret_value "EMU_OPENROUTER_API_KEY")"
+  anthropic_api_key="$(prompt_optional_secret_value "EMU_ANTHROPIC_API_KEY")"
+  cerebras_api_key="$(prompt_optional_secret_value "EMU_CEREBRAS_API_KEY")"
+  cohere_api_key="$(prompt_optional_secret_value "EMU_COHERE_API_KEY")"
+  gemini_api_key="$(prompt_optional_secret_value "EMU_GEMINI_API_KEY")"
+  groq_api_key="$(prompt_optional_secret_value "EMU_GROQ_API_KEY")"
+  hyperbolic_api_key="$(prompt_optional_secret_value "EMU_HYPERBOLIC_API_KEY")"
+  jina_ai_api_key="$(prompt_optional_secret_value "EMU_JINA_AI_API_KEY")"
+  sambanova_api_key="$(prompt_optional_secret_value "EMU_SAMBANOVA_API_KEY")"
+  together_ai_api_key="$(prompt_optional_secret_value "EMU_TOGETHER_AI_API_KEY")"
+  voyage_api_key="$(prompt_optional_secret_value "EMU_VOYAGE_API_KEY")"
+  resend_api_key="$(prompt_optional_secret_value "EMU_RESEND_API_KEY")"
+
+  render_interactive_secrets \
+    "${clickhouse_cluster_secret}" \
+    "${clickhouse_user_password}" \
+    "${clickhouse_readonly_password}" \
+    "${emupg_password}" \
+    "${vmuser_password}" \
+    "${emu_service_key}" \
+    "${studio_auth_secret}" \
+    "${grafana_admin_password}" \
+    "${openai_api_key}" \
+    "${huggingface_api_key}" \
+    "${openrouter_api_key}" \
+    "${anthropic_api_key}" \
+    "${cerebras_api_key}" \
+    "${cohere_api_key}" \
+    "${gemini_api_key}" \
+    "${groq_api_key}" \
+    "${hyperbolic_api_key}" \
+    "${jina_ai_api_key}" \
+    "${sambanova_api_key}" \
+    "${together_ai_api_key}" \
+    "${voyage_api_key}" \
+    "${resend_api_key}"
+
+  info "Wrote ${SECRETS_FILE}"
+  info "Review it if needed, then run: ./bin/tokenvisor-prereqs secrets apply"
+}
+
+secrets_init() {
+  local force=0
+  local interactive=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --force)
+        force=1
+        ;;
+      --interactive|-i)
+        interactive=1
+        ;;
+      *)
+        die "unknown secrets init option: $1"
+        ;;
+    esac
+    shift
+  done
+
+  ensure_local_dir
+  if [ -f "${SECRETS_FILE}" ] && [ "${force}" -ne 1 ]; then
+    die "${SECRETS_FILE} already exists; use --force to overwrite"
+  fi
+
+  if [ "${interactive}" -eq 1 ]; then
+    secrets_init_interactive
+    return 0
+  fi
+
+  sed \
+    -e "s/namespace: tokenvisor/namespace: ${TOKENVISOR_NAMESPACE}/g" \
+    -e "s/tokenvisor-pgbouncer.tokenvisor.svc/tokenvisor-pgbouncer.${TOKENVISOR_NAMESPACE}.svc/g" \
+    "${CHART_DIR}/docs/SECRETS_TEMPLATE.yaml" > "${SECRETS_FILE}"
+  info "Wrote ${SECRETS_FILE}"
+  info "Edit it, then run: ./bin/tokenvisor-prereqs secrets apply"
+}
+
+secrets_apply() {
+  require_tool kubectl
+  [ -f "${SECRETS_FILE}" ] || die "missing ${SECRETS_FILE}; run: ./bin/tokenvisor-prereqs secrets init"
+
+  if grep -q "CHANGE_ME_" "${SECRETS_FILE}"; then
+    die "${SECRETS_FILE} still contains CHANGE_ME_ placeholders"
+  fi
+
+  apply_namespaces_from_manifest "${SECRETS_FILE}"
+  kubectl apply -f "${SECRETS_FILE}"
+}
+
+secrets_ghcr() {
+  local apply=0
+  local assume_yes=0
+
+  require_tool kubectl
+  [ -n "${GHCR_USERNAME:-}" ] || die "GHCR_USERNAME is required"
+  [ -n "${GHCR_TOKEN:-}" ] || die "GHCR_TOKEN is required"
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply)
+        apply=1
+        ;;
+      --yes|-y)
+        assume_yes=1
+        ;;
+      --dry-run)
+        apply=0
+        ;;
+      *)
+        die "unknown secrets ghcr option: $1"
+        ;;
+    esac
+    shift
+  done
+
+  if [ "${apply}" -ne 1 ]; then
+    cat <<EOF
+Secrets ghcr will:
+  - create or update ${REGISTRY_SECRET_NAME} in namespace ${TOKENVISOR_NAMESPACE}
+  - use registry server ${GHCR_SERVER}
+
+Run with --apply to execute.
+EOF
+    return 0
+  fi
+
+  confirm_apply "GHCR pull secrets" "${assume_yes}"
+  namespace_manifest "${TOKENVISOR_NAMESPACE}" | kubectl apply -f -
+
+  info "Creating/updating ${REGISTRY_SECRET_NAME} in namespace ${TOKENVISOR_NAMESPACE}"
+  kubectl create secret docker-registry "${REGISTRY_SECRET_NAME}" \
+    --namespace "${TOKENVISOR_NAMESPACE}" \
+    --docker-server "${GHCR_SERVER}" \
+    --docker-username "${GHCR_USERNAME}" \
+    --docker-password "${GHCR_TOKEN}" \
+    --docker-email "${GHCR_EMAIL:-tokenvisor@example.invalid}" \
+    --dry-run=client \
+    -o yaml | kubectl apply -f -
+}
+
+run_secrets() {
+  local subcommand="${1:-}"
+  shift || true
+
+  case "${subcommand}" in
+    init)
+      secrets_init "$@"
+      ;;
+    apply)
+      secrets_apply "$@"
+      ;;
+    ghcr)
+      secrets_ghcr "$@"
+      ;;
+    *)
+      usage
+      die "unknown secrets subcommand: ${subcommand:-<empty>}"
+      ;;
+  esac
+}
+
+main() {
+  local command="${1:-}"
+  shift || true
+
+  case "${command}" in
+    check)
+      run_check "$@"
+      ;;
+    platform)
+      run_platform "$@"
+      ;;
+    storage)
+      run_storage "$@"
+      ;;
+    gpu)
+      run_gpu "$@"
+      ;;
+    skypilot)
+      run_skypilot "$@"
+      ;;
+    create-namespaces)
+      run_create_namespaces "$@"
+      ;;
+    secrets)
+      run_secrets "$@"
+      ;;
+    -h|--help|help|"")
+      usage
+      ;;
+    *)
+      usage
+      die "unknown command: ${command}"
+      ;;
+  esac
+}
+
+main "$@"

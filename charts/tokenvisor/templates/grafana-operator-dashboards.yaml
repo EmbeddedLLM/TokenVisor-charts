@@ -1,0 +1,135 @@
+{{- if and .Values.grafana.enabled (.Capabilities.APIVersions.Has "grafana.integreatly.org/v1beta1") }}
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: dragonfly-dashboard
+  namespace: dragonfly-operator-system
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  configMapRef:
+    name: dashboard-dragonfly-operator-grafana-dashboard
+    key: grafana-dashboard.json
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: grafana-dashboard
+  namespace: grafana-operator-system
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  configMapRef:
+    name: grafana-operator-dashboard
+    key: grafana-dashboard.json
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: cnpg-dashboard
+  namespace: cnpg-operator-system
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  configMapRef:
+    name: cnpg-grafana-dashboard
+    key: cnp.json
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: clickhouse-operator-dashboard
+  namespace: clickhouse-operator-system
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  configMapRef:
+    name: clickhouse-operator-altinity-clickhouse-operator-dashboards
+    key: Altinity_ClickHouse_Operator_dashboard.json
+{{- if and .Values.clickhouse.enabled (not (default false .Values.clickhouse.standalone)) }}
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: clickhouse-keeper-dashboard
+  namespace: clickhouse-operator-system
+spec:
+  resyncPeriod: 24h
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  url: https://raw.githubusercontent.com/Altinity/clickhouse-operator/master/grafana-dashboard/ClickHouseKeeper_dashboard.json
+  datasources:
+    - inputName: DS_PROMETHEUS
+      datasourceName: tokenvisor-vm-prometheus
+{{- end }}
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: clickhouse-queries-dashboard
+  namespace: clickhouse-operator-system
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  configMapRef:
+    name: clickhouse-operator-altinity-clickhouse-operator-dashboards
+    key: ClickHouse_Queries_dashboard.json
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: vmagent-dashboard
+  namespace: {{ include "tokenvisor.namespace" . }}
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  url: "https://grafana.com/api/dashboards/12683/revisions/23/download"
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: vlogs-dashboard
+  namespace: {{ include "tokenvisor.namespace" . }}
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  url: "https://grafana.com/api/dashboards/22084/revisions/5/download"
+{{- if .Values.vmalert.enabled }}
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: vmalert-dashboard
+  namespace: {{ include "tokenvisor.namespace" . }}
+spec:
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: tokenvisor-grafana
+  allowCrossNamespaceImport: true
+  url: "https://grafana.com/api/dashboards/14950/revisions/16/download"
+{{- end }}
+{{- end }}

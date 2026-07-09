@@ -1,0 +1,28 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-model-storage-pvc
+  namespace: tokenvisor
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-csi
+  volumeName: nfs-pv-static-tokenvisor
+  resources:
+    requests:
+      storage: 1Ti
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-model-storage-pvc
+  namespace: skypilot
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-csi
+  volumeName: nfs-pv-static-skypilot
+  resources:
+    requests:
+      storage: 1Ti

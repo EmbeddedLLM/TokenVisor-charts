@@ -1,0 +1,161 @@
+---
+# Source: skypilot-platform/templates/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: skyplatform-state
+  namespace: skypilot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: openebs-three-replica
+  # storageClassName: local-path
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: skypilot-config
+  namespace: skypilot
+data:
+  config.yaml: |
+    serve:
+      controller:
+        resources:
+          cpus: 2+
+    kubernetes:
+      ports: podip
+---
+# Source: skypilot-platform/templates/rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: skypilot-api-sa
+  namespace: skypilot
+---
+# Source: skypilot-platform/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: skypilot-api-role
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+# Source: skypilot-platform/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: skypilot-api-role-binding
+subjects:
+  - kind: ServiceAccount
+    name: skypilot-api-sa
+    namespace: skypilot
+roleRef:
+  kind: ClusterRole
+  name: skypilot-api-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Source: skypilot-platform/templates/api-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: skypilot-api-service
+  namespace: skypilot
+spec:
+  type: ClusterIP # Use NodePort to allow external access , e.g. CI in docker
+  ports:
+    - port: 80
+      targetPort: 46580 # Assuming your container listens on port 46580
+      # nodePort: 30000
+      protocol: TCP
+  selector:
+    app: skypilot-api
+---
+# Source: skypilot-platform/templates/api-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: skypilot-api-server
+  namespace: skypilot
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: skypilot-api
+  template:
+    metadata:
+      labels:
+        app: skypilot-api
+    spec:
+      # nodeSelector:
+      #   node-role.kubernetes.io/control-plane: "true"
+      # tolerations:
+      #   - key: node-role.kubernetes.io/control-plane
+      #     operator: Exists
+      #     effect: NoSchedule
+      automountServiceAccountToken: true
+      serviceAccountName: skypilot-api-sa
+      containers:
+        - name: skypilot-api
+          image: ghcr.io/embeddedllm/skypilot:v0.12.0
+          imagePullPolicy: Always
+          env:
+            - name: SKYPILOT_DEV
+              value: "1"
+          # Start api service and tail logs
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "Pre-deploy hook"
+              mkdir -p /root/.sky
+              echo "Copying config.yaml from ConfigMap \`skypilot-config\` to /root/.sky/config.yaml"
+              # The configmap serves as the ground truth for the config.yaml file.
+              # Any local changes to the config.yaml file will be overwritten by the contents of the configmap.
+              cp /tmp/config.yaml /root/.sky/config.yaml
+              sky api start --deploy && tail -f /root/.sky/api_server/server.log
+          ports:
+            - containerPort: 46580
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 46580
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 46580
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 3
+          volumeMounts:
+            - name: state-volume
+              mountPath: /root/.sky
+              subPath: .sky
+            - name: state-volume
+              mountPath: /root/.ssh # To preserve the SSH keys for the user when using the API server
+              subPath: .ssh
+            - name: skypilot-config
+              mountPath: /tmp/config.yaml
+              subPath: config.yaml
+      initContainers:
+      volumes:
+        - name: state-volume
+          persistentVolumeClaim:
+            claimName: skyplatform-state
+        - name: skypilot-config
+          configMap:
+            name: skypilot-config

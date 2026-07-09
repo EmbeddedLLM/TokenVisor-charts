@@ -1,0 +1,6 @@
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    scrape-by: vmagent
+dashboard:
+  enabled: true

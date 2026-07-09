@@ -1,0 +1,209 @@
+{{- if .Values.clickhouse.enabled }}
+{{- $standalone := default false .Values.clickhouse.standalone }}
+{{- $keeperImage := default "clickhouse/clickhouse-keeper:26.3" .Values.clickhouse.images.keeper }}
+{{- $serverImage := default "clickhouse/clickhouse-server:26.3" .Values.clickhouse.images.server }}
+{{- $keeperStorageClassName := default .Values.clickhouse.storageClassName .Values.clickhouse.keeper.storageClassName }}
+{{- $keeperStorageSize := default .Values.clickhouse.storageSize .Values.clickhouse.keeper.storageSize }}
+{{- $serverStorageClassName := default .Values.clickhouse.storageClassName .Values.clickhouse.server.storageClassName }}
+{{- $serverStorageSize := default .Values.clickhouse.storageSize .Values.clickhouse.server.storageSize }}
+{{- if not (.Capabilities.APIVersions.Has "clickhouse.altinity.com/v1") }}
+{{- fail "clickhouse.enabled=true but clickhouse.altinity.com/v1 CRD is not available" }}
+{{- end }}
+{{- if and (not $standalone) (not (.Capabilities.APIVersions.Has "clickhouse-keeper.altinity.com/v1")) }}
+{{- fail "clickhouse.enabled=true and clickhouse.standalone=false but clickhouse-keeper.altinity.com/v1 CRD is not available" }}
+{{- end }}
+{{- $secretName := default "clickhouse-secret" .Values.clickhouse.secrets.existingSecret }}
+{{- if not $standalone }}
+apiVersion: "clickhouse-keeper.altinity.com/v1"
+kind: "ClickHouseKeeperInstallation"
+metadata:
+  labels:
+    app.kubernetes.io/instance: chki-tokenvisor
+    app.kubernetes.io/part-of: clickhouse-cluster
+  name: clickhouse-keeper-installation
+  namespace: {{ include "tokenvisor.namespace" . }}
+spec:
+  configuration:
+    clusters:
+      - name: tv-cluster
+        layout:
+          replicasCount: {{ .Values.clickhouse.keeperReplicas }}
+    settings:
+      logger/level: "trace"
+      logger/console: "true"
+      listen_host: "0.0.0.0"
+      keeper_server/four_letter_word_white_list: "*"
+      keeper_server/coordination_settings/raft_logs_level: "information"
+      prometheus/endpoint: /metrics
+      prometheus/port: 7000
+      prometheus/metrics: true
+      prometheus/events: true
+      prometheus/asynchronous_metrics: true
+  defaults:
+    templates:
+      podTemplate: clickhouse
+      dataVolumeClaimTemplate: clickhouse
+  templates:
+    podTemplates:
+      - name: clickhouse
+        metadata:
+          labels:
+            app: clickhouse-keeper
+            app.kubernetes.io/instance: chk-tokenvisor
+            app.kubernetes.io/part-of: clickhouse-cluster
+          name: clickhouse-keeper
+          annotations:
+            config.linkerd.io/proxy-preserve-ip: "true"
+            prometheus.io/port: "7000"
+            prometheus.io/scrape: "true"
+        spec:
+{{- include "tokenvisor.haScheduling" (dict "ctx" $ "svc" .Values.clickhouse.keeper "podLabels" (dict "app" "clickhouse-keeper")) | nindent 10 }}
+          containers:
+            - name: clickhouse-keeper
+              imagePullPolicy: IfNotPresent
+              image: {{ $keeperImage }}
+              ports:
+                - name: chk-metrics
+                  containerPort: 7000
+{{- with .Values.clickhouse.keeper.resources }}
+              resources:
+{{- toYaml . | nindent 16 }}
+{{- end }}
+          securityContext:
+            fsGroup: 101
+
+    volumeClaimTemplates:
+      - name: clickhouse
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: {{ $keeperStorageClassName }}
+          resources:
+            requests:
+              storage: {{ $keeperStorageSize }}
+---
+{{- end }}
+apiVersion: "clickhouse.altinity.com/v1"
+kind: "ClickHouseInstallation"
+metadata:
+  labels:
+    app.kubernetes.io/instance: chi-tokenvisor
+    app.kubernetes.io/part-of: clickhouse-cluster
+  name: tokenvisor
+  namespace: {{ include "tokenvisor.namespace" . }}
+spec:
+  configuration:
+    users:
+      clickhouse_operator/networks/ip: "10.0.0.0/8"
+      emuuser/networks/ip: "::/0"
+      emuuser/profile: default
+      emuuser/quota: default
+      emuuser/access_management: 1
+      emuuser/password:
+        valueFrom:
+          secretKeyRef:
+            name: {{ $secretName }}
+            key: db_user_password
+    profiles:
+      default/allow_experimental_time_series_table: 1
+      default/allow_experimental_json_type: 1
+    settings:
+      prometheus/endpoint: /metrics
+      prometheus/port: 9363
+      prometheus/metrics: true
+      prometheus/events: true
+      prometheus/asynchronous_metrics: true
+      logger/level: "trace"
+      logger/console: "true"
+      logger/size: "100M"
+      logger/count: 5
+      listen_host: "0.0.0.0"
+    files:
+      conf.d/log_ttl_setup.xml: |
+        <clickhouse>
+          <text_log>
+            <ttl>event_date + INTERVAL 45 day</ttl>
+          </text_log>
+          <processors_profile_log>
+            <ttl>event_date + INTERVAL 45 day</ttl>
+          </processors_profile_log>
+          <metric_log>
+            <ttl>event_date + INTERVAL 45 day</ttl>
+          </metric_log>
+          <asynchronous_metric_log>
+            <ttl>event_date + INTERVAL 45 day</ttl>
+          </asynchronous_metric_log>
+          <trace_log>
+            <ttl>event_date + INTERVAL 45 day</ttl>
+          </trace_log>
+          <part_log>
+            <ttl>event_date + INTERVAL 45 day</ttl>
+          </part_log>
+        </clickhouse>
+{{- if not $standalone }}
+    zookeeper:
+      nodes:
+        - host: chk-clickhouse-keeper-installation-tv-cluster-0-0.{{ include "tokenvisor.namespace" . }}.svc.cluster.local
+          port: 2181
+        - host: chk-clickhouse-keeper-installation-tv-cluster-0-1.{{ include "tokenvisor.namespace" . }}.svc.cluster.local
+          port: 2181
+        - host: chk-clickhouse-keeper-installation-tv-cluster-0-2.{{ include "tokenvisor.namespace" . }}.svc.cluster.local
+          port: 2181
+      session_timeout_ms: 30000
+      operation_timeout_ms: 10000
+{{- end }}
+    clusters:
+      - name: tv-cluster
+        layout:
+          shardsCount: {{ .Values.clickhouse.shardsCount }}
+          replicasCount: {{ .Values.clickhouse.clusterReplicas }}
+        secret:
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: cluster_secret
+        templates:
+          podTemplate: clickhouse-with-volume
+
+  templates:
+    podTemplates:
+      - name: clickhouse-with-volume
+        metadata:
+          labels:
+            app: clickhouse-cluster
+            app.kubernetes.io/instance: ch-tokenvisor
+            app.kubernetes.io/part-of: clickhouse-cluster
+          annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/path: "/metrics"
+            prometheus.io/port: "9363"
+        spec:
+{{- include "tokenvisor.haScheduling" (dict "ctx" $ "svc" .Values.clickhouse.server "podLabels" (dict "app" "clickhouse-cluster")) | nindent 10 }}
+          containers:
+            - name: clickhouse
+              image: {{ $serverImage }}
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CLICKHOUSE_ALWAYS_RUN_INITDB_SCRIPTS
+                  value: "1"
+                - name: CLICKHOUSE_DB
+                  value: tokenvisor_emu
+{{- with .Values.clickhouse.server.resources }}
+              resources:
+{{- toYaml . | nindent 16 }}
+{{- end }}
+              volumeMounts:
+                - mountPath: /var/lib/clickhouse
+                  name: clickhouse-cluster-pvc
+          securityContext:
+            fsGroup: 101
+    volumeClaimTemplates:
+      - name: clickhouse-cluster-pvc
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: {{ $serverStorageClassName }}
+          resources:
+            requests:
+              storage: {{ $serverStorageSize }}
+{{- end }}

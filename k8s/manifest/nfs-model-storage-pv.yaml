@@ -1,0 +1,55 @@
+# For External NFS Cluster, go to the volumeAttributes
+# and edit the value for server and share parameters accordingly.
+# volumeAttributes:
+#   server: 172.24.1.120
+#   share: /sharon-ai-cloud/tokenvisor
+#
+# Performance Parameters
+# mountOptions:
+#   - nconnect=8   # Opens 8 TCP connections for higher throughput (Requires Kernel 5.3+)
+#   - vers=4.1     # Enforce NFS 4.1
+#   - noatime      # Performance optimization (don't update access times on read)
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-pv-static-tokenvisor
+spec:
+  capacity:
+    storage: 1Ti # This is just a label for K8s, NFS doesn't enforce it
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-csi
+  mountOptions:
+    - nconnect=8
+    - vers=4.1
+    - noatime
+  csi:
+    driver: nfs.csi.k8s.io
+    volumeHandle: nfs-volume-handle-tokenvisor
+    volumeAttributes:
+      server: nfs-server.nfs-server.svc.cluster.local
+      share: /
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-pv-static-skypilot
+spec:
+  capacity:
+    storage: 1Ti # This is just a label for K8s, NFS doesn't enforce it
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-csi
+  mountOptions:
+    - nconnect=8
+    - vers=4.1
+    - noatime
+  csi:
+    driver: nfs.csi.k8s.io
+    volumeHandle: nfs-volume-handle-skypilot
+    volumeAttributes:
+      server: nfs-server.nfs-server.svc.cluster.local
+      share: /

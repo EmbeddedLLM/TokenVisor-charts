@@ -1,0 +1,40 @@
+replicaCount: 2
+manager:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 200Mi
+    limits:
+      cpu: 1000m
+      memory: 2000Mi
+serviceMonitor:
+  enabled: true
+  labels:
+    scrape-by: vmagent
+grafanaDashboard:
+  enabled: true
+  folder: dragonfly
+  # -- Grafana dashboard configmap annotations.
+  annotations:
+    name: dragonfly_folder
+  # -- Grafana dashboard configmap labels
+  labels:
+    name: dragonfly_dashboard
+# HA Setup (Uncomment for HA)
+# manager:
+#   nodeSelector:
+#     node-role.kubernetes.io/control-plane: "true"
+#   tolerations:
+#     - key: node-role.kubernetes.io/control-plane
+#       operator: Exists
+#       effect: NoSchedule
+#   affinity:
+#     podAntiAffinity:
+#       requiredDuringSchedulingIgnoredDuringExecution:
+#         - labelSelector:
+#             matchExpressions:
+#               - key: app.kubernetes.io/name
+#                 operator: In
+#                 values:
+#                   - dragonfly-operator
+#           topologyKey: "kubernetes.io/hostname"

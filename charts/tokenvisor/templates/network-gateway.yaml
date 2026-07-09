@@ -1,0 +1,44 @@
+{{- if .Values.network.gateway.enabled }}
+{{- if .Values.network.gateway.createGatewayClass }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ .Values.network.gateway.className }}
+  labels:
+    {{- include "tokenvisor.labels" . | nindent 4 }}
+spec:
+  controllerName: io.cilium/gateway-controller
+---
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ .Values.network.gateway.name }}
+  namespace: {{ include "tokenvisor.namespace" . }}
+  labels:
+    {{- include "tokenvisor.labels" . | nindent 4 }}
+spec:
+  gatewayClassName: {{ .Values.network.gateway.className }}
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: {{ .Values.network.gateway.port | int }}
+      allowedRoutes:
+        namespaces:
+          from: All
+{{- if .Values.network.gateway.https.enabled }}
+    - name: https
+      protocol: HTTPS
+      port: {{ .Values.network.gateway.https.port | int }}
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+{{- if .Values.network.gateway.https.tlsSecretName }}
+        certificateRefs:
+          - kind: Secret
+            name: {{ .Values.network.gateway.https.tlsSecretName }}
+{{- end }}
+{{- end }}
+{{- end }}

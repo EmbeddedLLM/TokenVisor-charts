@@ -1,0 +1,136 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: emu-config
+  namespace: tokenvisor
+data:
+  EMU_PORT: "5969"
+  EMU_WORKERS: "8"
+  EMU_OPENTELEMETRY_HOST: "localhost"
+  EMU_OPENTELEMETRY_PORT: "4317"
+  EMU_REDIS_HOST: "dragonfly.tokenvisor.svc.cluster.local"
+  EMU_REDIS_PORT: "6379"
+  EMU_CLICKHOUSE_HOST: "clickhouse-tokenvisor.tokenvisor.svc.cluster.local"
+  EMU_CLICKHOUSE_PORT: "8123"
+  EMU_BENCHMARK_URL: "emu-api-server.tokenvisor.svc.cluster.local:5969"
+  # EMU_DB_INIT: "1"
+  # EMU_DB_PATH: "sqlite+libsql://libsql-replica.tokenvisor.svc.cluster.local:8080"
+  # EMU_DB_PATH: "sqlite+libsql://libsql-server.tokenvisor.svc.cluster.local:8080"
+  # EMU_DB_PATH: "rqlite+pyrqlite://rqlite.tokenvisor.svc.cluster.local"
+  EMU_DB_PATH: "postgresql+psycopg://emupg:emupg@tokenvisor-pgbouncer.tokenvisor.svc.cluster.local:5432/emu"
+  EMU_VICTORIA_METRICS_HOST: "vmauth-vmauth.tokenvisor.svc.cluster.local"
+  EMU_VICTORIA_METRICS_PORT: "8427"
+  EMU_VICTORIA_METRICS_USER: vmuser
+  EMU_VICTORIA_METRICS_PASSWORD: tokenvisor-vm-operator
+  EMU_VICTORIA_LOGS_HOST: "vls-victoria-logs-single-server.tokenvisor.svc.cluster.local"
+  EMU_VICTORIA_LOGS_PORT: "9428"
+  EMU_ENABLE_CREDIT_BALANCE_CHECK: "false"
+  EMU_ENABLE_CREDIT_DEDUCTION: "false"
+  EMU_ENABLE_CACHE_ISOLATION: "true"
+  EMU_ENABLE_BYOK: "true"
+  SKYPILOT_API_SERVER_ENDPOINT: "http://skypilot-api-service.skypilot.svc.cluster.local"
+  EMU_PRESIDIO_ANALYZER_URL: "http://presidio-analyzer.tokenvisor.svc.cluster.local:3000"
+  EMU_PRESIDIO_ANONYMIZER_URL: "http://presidio-anonymizer.tokenvisor.svc.cluster.local:3000"
+  SERVICE_NAME: "emu"
+  OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST: "X-.*"
+  OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION: base2_exponential_bucket_histogram
+  OTEL_PYTHON_FASTAPI_EXCLUDED_URLS: "api/health"
+  HF_HOME: "/hf_repo"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: tokenvisor
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: "0.0.0.0:4317"
+          http:
+            endpoint: "0.0.0.0:4318"
+
+    exporters:
+      otlphttp/victoriametrics1:
+        endpoint: "http://vmagent-vmagent-agg-0.vmagent-emu-aggregate.tokenvisor.svc:8429/opentelemetry"
+        compression: gzip
+        encoding: proto
+
+      otlphttp/victoriametrics2:
+        endpoint: "http://vmagent-vmagent-agg-1.vmagent-emu-aggregate.tokenvisor.svc:8429/opentelemetry"
+        compression: gzip
+        encoding: proto
+
+      otlphttp/victoriametrics3:
+        endpoint: "http://vmagent-vmagent-agg-2.vmagent-emu-aggregate.tokenvisor.svc:8429/opentelemetry"
+        compression: gzip
+        encoding: proto
+
+      debug:
+        verbosity: detailed
+
+      clickhouse:
+        endpoint: http://clickhouse-tokenvisor.tokenvisor.svc.cluster.local:8123?dial_timeout=10s&compress=lz4&async_insert=1
+        ttl: 24h
+        database: tokenvisor_emu
+        traces_table_name: emu_traces
+        username: emuuser
+        password: emupassword
+        create_schema: false
+        timeout: 5s
+        sending_queue:
+          queue_size: 1000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+      otlphttp/vl1:
+        logs_endpoint: http://vls-victoria-logs-single-server-0.vls-victoria-logs-single-server.tokenvisor.svc.cluster.local:9428/insert/opentelemetry/v1/logs
+
+      otlphttp/vl2:
+        logs_endpoint: http://vls-victoria-logs-single-server-1.vls-victoria-logs-single-server.tokenvisor.svc.cluster.local:9428/insert/opentelemetry/v1/logs
+
+    processors:
+      batch:
+        timeout: 5s
+
+      filter/ottl:
+        traces:
+          span:
+            - 'IsMatch(attributes["db.statement"], "^PRAGMA")'
+
+    extensions:
+      health_check:
+        endpoint: "0.0.0.0:13133"
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [filter/ottl, batch]
+          exporters: [clickhouse]
+        metrics:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [otlphttp/victoriametrics1, otlphttp/victoriametrics2, otlphttp/victoriametrics3]
+        logs:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [otlphttp/vl1, otlphttp/vl2]
+
+# ---
+# apiVersion: v1
+# kind: ConfigMap
+# metadata:
+#   name: sky-config
+#   namespace: tokenvisor
+# data:
+#   config.yaml: |
+#     api_server:
+#       endpoint: http://skypilot-api-service.skypilot.svc.cluster.local

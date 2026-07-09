@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: emu-deployment
+  namespace: {{ include "tokenvisor.namespace" . }}
+  labels:
+    {{- include "tokenvisor.labels" . | nindent 4 }}
+    app: emu
+spec:
+  replicas: {{ .Values.emu.replicas }}
+{{- include "tokenvisor.haStrategy" (dict "ctx" $ "svc" .Values.emu) | nindent 2 }}
+  selector:
+    matchLabels:
+      app: emu
+  template:
+    metadata:
+      labels:
+        app: emu
+        app.kubernetes.io/instance: tokenvisor-emu-otel
+        app.kubernetes.io/part-of: emu-backend
+    spec:
+{{- include "tokenvisor.haScheduling" (dict "ctx" $ "svc" .Values.emu "podLabels" (dict "app" "emu")) | nindent 6 }}
+      serviceAccountName: {{ .Values.emu.serviceAccountName }}
+{{- include "tokenvisor.imagePullSecrets" . | nindent 6 }}
+{{ if .Values.emu.initWaiter.enabled }}
+      initContainers:
+        - name: wait-postgres
+          image: {{ .Values.emu.initWaiter.postgres.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+{{ include "tokenvisor.waitPostgresScript" . | nindent 14 }}
+        - name: wait-clickhouse-vm
+          image: {{ .Values.emu.initWaiter.clickhouse.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+{{ include "tokenvisor.waitClickhouseVmScript" . | nindent 14 }}
+          env:
+            - name: CH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.emu.secretRefs.clickhouseSecretName }}
+                  key: {{ .Values.emu.secretRefs.clickhousePasswordKey }}
+{{ end }}
+      containers:
+        - name: emu
+          image: {{ .Values.emu.image }}
+          imagePullPolicy: {{ .Values.emu.imagePullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: emu-config
+{{- if or .Values.emu.secret.existingSecret .Values.emu.secret.create }}
+            - secretRef:
+                name: {{ default "emu-secret" .Values.emu.secret.existingSecret }}
+{{- end }}
+          env:
+            - name: EMU_VICTORIA_METRICS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.emu.secretRefs.vmuserSecretName }}
+                  key: {{ .Values.emu.secretRefs.vmuserPasswordKey }}
+            - name: EMU_CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.emu.secretRefs.clickhouseSecretName }}
+                  key: {{ .Values.emu.secretRefs.clickhousePasswordKey }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              uv run --no-sync python -m emu.entrypoints.api
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: {{ .Values.emu.service.port | int }}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: {{ .Values.emu.service.port | int }}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 3
+          resources:
+{{- toYaml .Values.emu.resources | nindent 12 }}
+          volumeMounts:
+            - name: model-storage
+              mountPath: /hf_repo
+        - name: otel-collector
+          image: {{ .Values.emu.otelCollector.image }}
+          args: ["--config=/etc/otelcol/config.yaml"]
+          ports:
+            - name: metrics
+              containerPort: 8889
+          env:
+            - name: CH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.emu.secretRefs.clickhouseSecretName }}
+                  key: {{ .Values.emu.secretRefs.clickhousePasswordKey }}
+          volumeMounts:
+            - name: otel-config
+              mountPath: /etc/otelcol/config.yaml
+              subPath: config.yaml
+          resources:
+{{- toYaml .Values.emu.otelCollector.resources | nindent 12 }}
+      volumes:
+        - name: otel-config
+          configMap:
+            name: otel-collector-config
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: {{ default .Values.storage.modelPvc.name .Values.emu.modelStorage.existingClaim }}

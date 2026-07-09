@@ -1,0 +1,119 @@
+{{- if and .Values.cnpg.enabled (.Capabilities.APIVersions.Has "postgresql.cnpg.io/v1") }}
+{{- $secretName := default "pg-emu-user-secret" .Values.cnpg.secrets.existingSecret }}
+apiVersion: postgresql.cnpg.io/v1
+kind: ImageCatalog
+metadata:
+  name: postgresql
+spec:
+  images:
+    - major: 17
+      image: {{ .Values.cnpg.image }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: tokenvisor-postgresql-cluster
+  namespace: {{ include "tokenvisor.namespace" . }}
+  labels:
+    app.kubernetes.io/instance: cnpg-tokenvisor
+    app.kubernetes.io/part-of: cnpg-cluster
+spec:
+  instances: {{ .Values.cnpg.instances }}
+{{- if eq (default "ha" .Values.deployment.mode) "ha" }}
+  affinity:
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: "true"
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+    additionalPodAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: cnpg.io/podRole
+                operator: In
+                values:
+                  - instance
+          topologyKey: kubernetes.io/hostname
+{{- end }}
+{{- with .Values.cnpg.resources }}
+  resources:
+{{- toYaml . | nindent 4 }}
+{{- end }}
+  imageCatalogRef:
+    apiGroup: postgresql.cnpg.io
+    kind: ImageCatalog
+    name: postgresql
+    major: 17
+  managed:
+    roles:
+      - name: tokenvisor_auditor
+        ensure: present
+        comment: pgaudit role for tokenvisor
+        login: false
+  postgresql:
+    parameters:
+      pgaudit.log: "ddl, role"
+      pgaudit.log_catalog: "off"
+      pgaudit.log_parameter: "on"
+      pgaudit.log_client: "on"
+      pgaudit.role: "tokenvisor_auditor"
+      max_connections: "100"
+      deadlock_timeout: "5s"
+  bootstrap:
+    initdb:
+      database: emu
+      owner: emupg
+      secret:
+        name: {{ $secretName }}
+  monitoring:
+    enablePodMonitor: true
+  storage:
+    pvcTemplate:
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: {{ .Values.cnpg.storageSize }}
+      storageClassName: {{ .Values.cnpg.storageClassName }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: tokenvisor-pgbouncer
+  namespace: {{ include "tokenvisor.namespace" . }}
+spec:
+  cluster:
+    name: tokenvisor-postgresql-cluster
+  instances: 1
+{{- if eq (default "ha" .Values.deployment.mode) "ha" }}
+  template:
+    spec:
+      containers: []
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: cnpg.io/podRole
+                    operator: In
+                    values:
+                      - pooler
+              topologyKey: kubernetes.io/hostname
+{{- end }}
+  type: rw
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      max_client_conn: "1000"
+      default_pool_size: "80"
+  monitoring:
+    enablePodMonitor: true
+{{- end }}

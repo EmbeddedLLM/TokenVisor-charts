@@ -1,0 +1,694 @@
+global:
+  namespace: tokenvisor
+  minNodesRequired: 3
+  imagePullSecrets:
+    - name: registry-secret
+
+deployment:
+  mode: ha # allowed: ha, single-node
+
+validation:
+  failOnMissingModelPVC: true
+  failOnMissingStorageClass: true
+  lookupExistingResources: true
+
+emu:
+  image: ghcr.io/embeddedllm/tokenvisor-emu:latest
+  imagePullPolicy: Always
+  # HA mode spreads these one-per-node (control-plane) via podAntiAffinity and uses a
+  # surge-down rollout; see tokenvisor.haScheduling/haStrategy helpers. Single-node sets 1.
+  replicas: 3
+  # Optional overrides for HA scheduling (only used when deployment.mode=ha):
+  # nodeSelector: {}   # defaults to control-plane pinning
+  # tolerations: []    # defaults to tolerating the control-plane NoSchedule taint
+  # affinity: {}       # defaults to one-pod-per-node podAntiAffinity on app=emu
+  # strategy: {}       # defaults to RollingUpdate maxSurge=0 / maxUnavailable=1
+  serviceAccountName: emu
+  service:
+    name: emu-api-server
+    port: 5969
+  rbac:
+    create: true
+  resources:
+    requests:
+      cpu: "4000m"
+      memory: "4Gi"
+  config:
+    EMU_PORT: "5969"
+    EMU_WORKERS: "8"
+    EMU_OPENTELEMETRY_HOST: "localhost"
+    EMU_OPENTELEMETRY_PORT: "4317"
+    EMU_REDIS_HOST: "dragonfly.tokenvisor.svc.cluster.local"
+    EMU_REDIS_PORT: "6379"
+    EMU_CLICKHOUSE_HOST: "clickhouse-tokenvisor.tokenvisor.svc.cluster.local"
+    EMU_CLICKHOUSE_PORT: "8123"
+    EMU_CLICKHOUSE_USER: "emuuser"
+    EMU_BENCHMARK_URL: "emu-api-server.tokenvisor.svc.cluster.local:5969"
+    EMU_VICTORIA_METRICS_HOST: "vmauth-vmauth.tokenvisor.svc.cluster.local"
+    EMU_VICTORIA_METRICS_PORT: "8427"
+    EMU_VICTORIA_METRICS_USER: "vmuser"
+    EMU_VICTORIA_LOGS_HOST: "vls-victoria-logs-single-server.tokenvisor.svc.cluster.local"
+    EMU_VICTORIA_LOGS_PORT: "9428"
+    EMU_ENABLE_CREDIT_BALANCE_CHECK: "false"
+    EMU_ENABLE_CREDIT_DEDUCTION: "false"
+    EMU_ENABLE_CACHE_ISOLATION: "true"
+    EMU_ENABLE_BYOK: "true"
+    SKYPILOT_API_SERVER_ENDPOINT: "http://skypilot-api-service.skypilot.svc.cluster.local"
+    EMU_PRESIDIO_ANALYZER_URL: "http://presidio-analyzer.tokenvisor.svc.cluster.local:3000"
+    EMU_PRESIDIO_ANONYMIZER_URL: "http://presidio-anonymizer.tokenvisor.svc.cluster.local:3000"
+    SERVICE_NAME: "emu"
+    OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST: "X-.*"
+    OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION: base2_exponential_bucket_histogram
+    OTEL_PYTHON_FASTAPI_EXCLUDED_URLS: "api/health"
+    HF_HOME: "/hf_repo"
+  secret:
+    create: false
+    existingSecret: emu-secret
+    data: {}
+  secretRefs:
+    clickhouseSecretName: clickhouse-secret
+    clickhousePasswordKey: db_user_password
+    vmuserSecretName: vmuser-secret
+    vmuserPasswordKey: password
+  initWaiter:
+    enabled: true
+    intervalSeconds: 5
+    timeoutSeconds: 600
+    postgres:
+      image: postgres:17-alpine
+      host: tokenvisor-pgbouncer.tokenvisor.svc.cluster.local
+      port: 5432
+    clickhouse:
+      image: curlimages/curl:8.12.1
+      host: clickhouse-tokenvisor.tokenvisor.svc.cluster.local
+      port: 8123
+      user: emuuser
+      database: tokenvisor_emu
+      clusterName: tv-cluster
+      checkClusterCount: true
+      expectedClusterNumber: 3
+      requiredTables:
+        - llm_usage
+        - embed_usage
+        - rerank_usage
+        - deployment_usage
+        - emu_traces
+        - emu_traces_trace_id_ts
+        - emu_traces_trace_id_ts_mv
+    victoriametrics:
+      host: vmauth-vmauth.tokenvisor.svc.cluster.local
+      port: 8427
+  otelCollector:
+    image: otel/opentelemetry-collector-contrib:0.113.0
+    dynamicTargets:
+      # NOTE:
+      # - When enabled, chart templates derive OTEL VM/VL exporter endpoints from replica topology.
+      # - Exporters matching otlphttp/victoriametrics* and otlphttp/vl* are regenerated at render time.
+      # - metrics/logs pipeline exporter lists are also regenerated.
+      enabled: true
+      victoriaMetrics:
+        serviceName: vmagent-emu-aggregate
+        port: 8429
+        path: /opentelemetry
+      victoriaLogs:
+        serviceName: vls-victoria-logs-single-server
+        port: 9428
+        path: /insert/opentelemetry/v1/logs
+    resources:
+      requests:
+        cpu: "300m"
+        memory: "128Mi"
+      limits:
+        cpu: "1000m"
+        memory: "256Mi"
+    # Base OTEL config for receivers/processors/non-topology exporters.
+    # If dynamicTargets.enabled=true, VM/VL exporter endpoints below are treated as defaults and may be overwritten.
+    # For replica changes, prefer editing victoriametrics.* and victoria-logs-single.* values instead of this block.
+    config: |
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: "0.0.0.0:4317"
+            http:
+              endpoint: "0.0.0.0:4318"
+
+      exporters:
+        otlphttp/victoriametrics1:
+          endpoint: "http://vmagent-vmagent-agg-0.vmagent-emu-aggregate.tokenvisor.svc:8429/opentelemetry"
+          compression: gzip
+          encoding: proto
+
+        otlphttp/victoriametrics2:
+          endpoint: "http://vmagent-vmagent-agg-1.vmagent-emu-aggregate.tokenvisor.svc:8429/opentelemetry"
+          compression: gzip
+          encoding: proto
+
+        otlphttp/victoriametrics3:
+          endpoint: "http://vmagent-vmagent-agg-2.vmagent-emu-aggregate.tokenvisor.svc:8429/opentelemetry"
+          compression: gzip
+          encoding: proto
+
+        debug:
+          verbosity: detailed
+
+        clickhouse:
+          endpoint: http://clickhouse-tokenvisor.tokenvisor.svc.cluster.local:8123?dial_timeout=10s&compress=lz4&async_insert=1
+          ttl: 24h
+          database: tokenvisor_emu
+          traces_table_name: emu_traces
+          username: emuuser
+          password: ${env:CH_PASSWORD}
+          create_schema: false
+          timeout: 5s
+          sending_queue:
+            queue_size: 1000
+          retry_on_failure:
+            enabled: true
+            initial_interval: 5s
+            max_interval: 30s
+            max_elapsed_time: 300s
+
+        otlphttp/vl1:
+          logs_endpoint: http://vls-victoria-logs-single-server-0.vls-victoria-logs-single-server.tokenvisor.svc.cluster.local:9428/insert/opentelemetry/v1/logs
+
+        otlphttp/vl2:
+          logs_endpoint: http://vls-victoria-logs-single-server-1.vls-victoria-logs-single-server.tokenvisor.svc.cluster.local:9428/insert/opentelemetry/v1/logs
+
+      processors:
+        batch:
+          timeout: 5s
+
+        filter/ottl:
+          traces:
+            span:
+              - 'IsMatch(attributes["db.statement"], "^PRAGMA")'
+
+      extensions:
+        health_check:
+          endpoint: "0.0.0.0:13133"
+
+      service:
+        extensions: [health_check]
+        pipelines:
+          traces:
+            receivers: [otlp]
+            processors: [filter/ottl, batch]
+            exporters: [clickhouse]
+          metrics:
+            receivers: [otlp]
+            processors: [batch]
+            exporters: [otlphttp/victoriametrics1, otlphttp/victoriametrics2, otlphttp/victoriametrics3]
+          logs:
+            receivers: [otlp]
+            processors: [batch]
+            exporters: [otlphttp/vl1, otlphttp/vl2]
+  modelStorage:
+    # NOTE: emu backend currently expects this PVC name (do not change unless code is updated)
+    existingClaim: nfs-model-storage-pvc
+  pdb:
+    minAvailable: 1
+
+starling:
+  image: ghcr.io/embeddedllm/tokenvisor-emu:latest
+  imagePullPolicy: Always
+  replicas: 3
+  serviceAccountName: emu
+  resources:
+    requests:
+      cpu: "1000m"
+      memory: "1Gi"
+  worker:
+    replicas: 3
+    resources:
+      requests:
+        cpu: "1000m"
+        memory: "1Gi"
+  beat:
+    replicas: 3
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+  otelCollector:
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "64Mi"
+      limits:
+        cpu: "500m"
+        memory: "128Mi"
+  pdb:
+    minAvailable: 1
+
+studio:
+  image: ghcr.io/embeddedllm/tokenvisor-studio:latest
+  imagePullPolicy: Always
+  replicas: 3
+  serviceAccountName: studio
+  service:
+    name: studio-frontend-server
+    port: 4969
+  resources: {}
+  config:
+    HOST: "devstudio.tokenvisor.ai"
+    ORIGIN: "https://devstudio.tokenvisor.ai"
+    EMU_URL: "http://emu-api-server.tokenvisor.svc.cluster.local:5969"
+    STUDIO_PORT: "4969"
+    NODE_ENV: "production"
+    BODY_SIZE_LIMIT: "Infinity"
+    CHECK_ORIGIN: "false"
+    USE_SECURE_COOKIES: "true"
+    ABSOLUTE_AUTH_TIMEOUT: "86400"
+    IDLE_AUTH_TIMEOUT: "900"
+  secret:
+    create: false
+    existingSecret: studio-secret
+    data: {}
+  authConfigYaml: |
+    # features:
+    #   user-pass-login:
+    #     login: true
+    #     signups: true
+    #   redirect-to-idp: false
+    #   organization:
+    #     no-orgs-message: "You don't belong to any organizations yet. Please contact support."
+  themeCss: |
+    :root {
+      --background: 216 24% 96%;
+      --foreground: 222.2 84% 4.9%;
+
+      --muted: 220 14% 96%;
+      --muted-foreground: 220 9% 56%;
+
+      --popover: 0 0% 100%;
+      --popover-foreground: 222.2 84% 4.9%;
+
+      --card: 0 0% 100%;
+      --card-foreground: 222.2 84% 4.9%;
+
+      --border: 214.3 31.8% 88%;
+      --input: 214.3 31.8% 91.4%;
+
+      --primary: 192 67% 32%;
+      --primary-foreground: 210 40% 98%;
+
+      /* Secondary color scale */
+      --secondary-50: 210 40% 98%;
+      --secondary-100: 210 40% 96%;
+      --secondary-200: 213 26% 88%;
+      --secondary-300: 215 18% 80%;
+      --secondary-400: 215 17% 72%;
+      --secondary-500: 215 16% 65%;
+      --secondary-600: 215 16% 57%;
+      --secondary-700: 215 16% 45%;
+      --secondary-800: 215 16% 30%;
+      --secondary-900: 216 18% 18%;
+
+      /* Semantic aliases */
+      --secondary: var(--secondary-200);
+      --secondary-foreground: var(--secondary-800);
+
+      --tertiary: 184 52% 63%;
+      --tertiary-foreground: 192 67% 32%;
+
+      --highlight: 280 53% 48%;
+      --highlight-foreground: 0 0% 100%;
+
+      --accent: 77 100% 93%;
+      --accent-strong: 87 82% 64%;
+      --accent-foreground: 222.2 47.4% 11.2%;
+
+      --destructive: 0 72.2% 50.6%;
+      --destructive-foreground: 210 40% 98%;
+
+      --success: 138 76% 97%;
+      --success-foreground: 142 72% 29%;
+
+      --error: 0 84% 60%;
+      --error-foreground: 210 40% 98%;
+
+      --warning: 38 85% 60%;
+      --warning-foreground: 0 0% 100%;
+
+      --ring: 222.2 84% 4.9%;
+
+      --radius: 0.75rem;
+
+      --navbar-system-from: 210 12% 34%;
+      --navbar-system-to: 208 31% 70%;
+
+      --navbar-organization-from: 193 100% 33%;
+      --navbar-organization-to: 189 100% 13%;
+
+      --navbar-project-from: 253 32% 61%;
+      --navbar-project-to: 247 21% 28%;
+    }
+  # Base64-encoded logo files (binaryData). Override default logos.
+  # See docs/CUSTOMIZATION.md for an example.
+  logosBinaryData: {}
+  pdb:
+    minAvailable: 1
+  initWaiter:
+    enabled: true
+    image: curlimages/curl:8.12.1
+    intervalSeconds: 5
+    timeoutSeconds: 600
+    emuHealthUrl: "http://emu-api-server.tokenvisor.svc.cluster.local:5969/api/health"
+
+network:
+  gateway:
+    enabled: true
+    createGatewayClass: false
+    className: cilium
+    name: cilium-gateway
+    port: 80
+    https:
+      enabled: false
+      port: 443
+      tlsSecretName: "" # required when https.enabled is true; set to the Secret name cert-manager will create
+  routes:
+    enabled: true
+    name: tokenvisor-http-route
+    emuPath: /api/v1
+    studioPath: /
+    vmPath: /vm
+    vlPath: /vl
+    backends:
+      vmauth:
+        name: vmauth-vmauth
+        port: 8427
+    grafana:
+      enabled: true
+      path: /grafana
+      serviceName: tokenvisor-grafana-service
+      port: 3000
+    argocd:
+      enabled: false
+      namespace: argocd
+      serviceName: argocd-server
+      port: 80
+
+storage:
+  modelPvc:
+    create: false
+    # NOTE: emu backend currently expects this PVC name (do not change unless code is updated)
+    name: nfs-model-storage-pvc
+    storageClassName: ""
+    volumeName: ""
+    accessModes:
+      - ReadWriteMany
+    size: 20Gi
+
+clickhouse:
+  enabled: true
+  standalone: false
+  # NOTE: shardsCount > 1 is not validated/tested by this chart path.
+  shardsCount: 1
+  images:
+    keeper: clickhouse/clickhouse-keeper:26.3
+    server: clickhouse/clickhouse-server:26.3
+  storageClassName: openebs-three-replica
+  storageSize: 10Gi
+  keeperReplicas: 3
+  clusterReplicas: 3
+  keeper:
+    storageClassName: ""
+    storageSize: ""
+    resources:
+      requests:
+        memory: "256M"
+        cpu: "350m"
+      limits:
+        memory: "4Gi"
+        cpu: "2"
+  server:
+    storageClassName: ""
+    storageSize: ""
+    resources: {}
+  secrets:
+    existingSecret: clickhouse-secret
+    create: false
+    data: {}
+  initJob:
+    enabled: true
+    # If true, run as a Helm hook so Helm waits for completion (may need larger --timeout).
+    # Default false keeps it as a normal Job; EMU/Starling/Studio still gate on readiness via waiters.
+    useHelmHook: false
+    checkClusterCount: true
+    image: clickhouse/clickhouse-client:latest
+    user: emuuser
+    host: clickhouse-tokenvisor.tokenvisor.svc.cluster.local
+    clusterName: tv-cluster
+    expectedClusterNumber: "3"
+    readonlyUser: emu_readonly
+
+cnpg:
+  enabled: true
+  image: ghcr.io/cloudnative-pg/postgresql:17.6-202510060807-standard-trixie
+  instances: 1
+  resources: {}
+  storageClassName: openebs-three-replica
+  storageSize: 10Gi
+  secrets:
+    existingSecret: pg-emu-user-secret
+    create: false
+    data: {}
+
+dragonfly:
+  enabled: true
+  replicas: 2
+  resources:
+    requests:
+      cpu: 500m
+      memory: 500Mi
+    limits:
+      cpu: 2000m
+      memory: 4000Mi
+
+presidio:
+  enabled: true
+  analyzer:
+    image: mcr.microsoft.com/presidio-analyzer:2.2.362
+    imagePullPolicy: IfNotPresent
+    replicas: 1
+    # Analyzer loads SpaCy NLP model (~600MB) into memory and is CPU-bound on text processing.
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "2000m"
+        memory: "2Gi"
+  anonymizer:
+    image: mcr.microsoft.com/presidio-anonymizer:2.2.362
+    imagePullPolicy: IfNotPresent
+    replicas: 1
+    # Anonymizer is lighter — applies redaction rules without loading an NLP model.
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+
+victoriametrics:
+  enabled: true
+  images:
+    vmagent:
+      repository: victoriametrics/vmagent
+      tag: v1.140.0
+    vmauth:
+      repository: victoriametrics/vmauth
+      tag: v1.140.0
+    clusterVersion: v1.140.0-cluster
+  storageClassName: openebs-three-replica
+  vmagentAgg:
+    replicaCount: 3
+    podPrefix: vmagent-vmagent-agg
+    storageSize: 2Gi
+    resources:
+      limits:
+        cpu: 1500m
+        memory: 1500Mi
+      requests:
+        cpu: 500m
+        memory: 500Mi
+  vmagent:
+    replicaCount: 2
+    resources:
+      limits:
+        cpu: 1500m
+        memory: 1500Mi
+      requests:
+        cpu: 500m
+        memory: 500Mi
+  vmclusterShortterm:
+    retentionPeriod: "90d"
+    replicationFactor: 1
+    requestsLoadBalancer:
+      enabled: true
+      replicaCount: 1
+    vmstorage:
+      replicaCount: 2
+      storageSize: 5Gi
+      resources:
+        limits:
+          cpu: "3"
+          memory: "3Gi"
+        requests:
+          cpu: 500m
+          memory: 500Mi
+    vminsert:
+      replicaCount: 2
+      resources:
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+        requests:
+          cpu: "0.5"
+          memory: "500Mi"
+  vmcluster:
+    retentionPeriod: "100y"
+    replicationFactor: 2
+    requestsLoadBalancer:
+      enabled: true
+      replicaCount: 2
+    vmstorage:
+      replicaCount: 2
+      storageSize: 10Gi
+      resources:
+        limits:
+          cpu: "3"
+          memory: "3Gi"
+        requests:
+          cpu: 500m
+          memory: 500Mi
+    vmselect:
+      replicaCount: 2
+      storageSize: 1Gi
+      resources:
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+        requests:
+          cpu: "0.5"
+          memory: "500Mi"
+    vminsert:
+      replicaCount: 2
+      resources:
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+        requests:
+          cpu: "0.5"
+          memory: "500Mi"
+  vmauth:
+    replicaCount: 2
+    resources:
+      limits:
+        cpu: 1500m
+        memory: 1500Mi
+      requests:
+        cpu: 500m
+        memory: 500Mi
+  vmuser:
+    existingSecret: vmuser-secret
+    create: false
+    password: ""
+
+victoria-logs-single:
+  enabled: true
+  fullnameOverride: vls-victoria-logs-single
+  server:
+    tag: v1.41.1
+    replicaCount: 2
+    # VLS is a subchart, so this can't use tokenvisor.haScheduling; the single-node overlay clears it.
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: "true"
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: victoria-logs-single
+            topologyKey: kubernetes.io/hostname
+    service:
+      servicePort: 9428
+    retentionPeriod: "100y"
+    retentionDiskSpaceUsage: "9GiB"
+    persistentVolume:
+      enabled: true
+      storageClassName: openebs-three-replica
+      size: 10Gi
+    resources:
+      limits:
+        cpu: 3000m
+        memory: 3000Mi
+      requests:
+        cpu: 500m
+        memory: 512Mi
+    vmServiceScrape:
+      enabled: true
+      extraLabels:
+        scrape-by: vmagent
+
+grafana:
+  enabled: false
+  adminUser: tokenvisor-admin
+  adminPassword: ""
+  clickhouseReadonlyPassword: ""
+  adminSecret:
+    name: grafana-secret
+    key: admin_password
+  clickhouseSecret:
+    name: clickhouse-secret
+    key: db_readonly_user_password
+
+fluentbit:
+  enabled: false
+  namespace: fluent-operator-system
+  image: ghcr.io/fluent/fluent-operator/fluent-bit:v4.1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 25Mi
+    limits:
+      cpu: 500m
+      memory: 200Mi
+  victoriaLogsOutputNamePrefix: vls-output
+
+vmalert:
+  enabled: false
+  tokenvisorWebhookUrl: ""
+  tokenvisorLogWebhookUrl: ""
+  enableLogRules: true
+  vmAlert:
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "250m"
+      limits:
+        memory: "128Mi"
+        cpu: "500m"
+  vmAlertLog:
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "250m"
+      limits:
+        memory: "128Mi"
+        cpu: "500m"
+  alertmanager:
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "250m"
+      limits:
+        memory: "128Mi"
+        cpu: "500m"

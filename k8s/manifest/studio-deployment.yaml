@@ -1,0 +1,118 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: tokenvisor
+  name: studio-deployment
+  labels:
+    app: studio
+spec:
+  # HA Setup (Uncomment for HA)
+  # replicas: 3
+  # strategy:
+  #   type: RollingUpdate
+  #   rollingUpdate:
+  #     maxSurge: 0
+  #     maxUnavailable: 1
+  replicas: 1
+  selector:
+    matchLabels:
+      app: studio
+  template:
+    metadata:
+      labels:
+        app: studio
+    spec:
+      # HA Setup (Uncomment for HA)
+      #   nodeSelector:
+      #     node-role.kubernetes.io/control-plane: "true"
+      #   tolerations:
+      #     - key: node-role.kubernetes.io/control-plane
+      #       operator: Exists
+      #       effect: NoSchedule
+      #   affinity:
+      #     podAntiAffinity:
+      #       requiredDuringSchedulingIgnoredDuringExecution:
+      #         - labelSelector:
+      #             matchLabels:
+      #               app: studio
+      #           topologyKey: "kubernetes.io/hostname"
+      serviceAccountName: studio
+      imagePullSecrets:
+        - name: github-registry-secret
+      containers:
+        - name: studio
+          image: ghcr.io/embeddedllm/tokenvisor-studio:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 4969
+          envFrom:
+            - configMapRef:
+                name: studio-config
+          volumeMounts:
+            - name: logos-volume
+              mountPath: /app/static/icon-landscape.svg
+              subPath: icon-landscape.svg
+            - name: logos-volume
+              mountPath: /app/static/favicon.svg
+              subPath: favicon.svg
+            - name: logos-volume
+              mountPath: /app/static/icon-square.svg
+              subPath: icon-square.svg
+            - name: auth-yaml-config
+              mountPath: /app/studio-config.yml
+              subPath: studio-config.yml
+            - name: themes-volume
+              mountPath: /app/static/theme.css
+              subPath: theme.css
+          command: ["node", "server"]
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 4969
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 4969
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        - name: logos-volume
+          configMap:
+            name: studio-logos
+        - name: themes-volume
+          configMap:
+            name: studio-themes
+        - name: auth-yaml-config
+          configMap:
+            name: studio-auth-yaml-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: tokenvisor
+  labels:
+    app: studio
+    # app.kubernetes.io/part-of: emu-backend
+  name: studio-frontend-server
+spec:
+  selector:
+    app: studio
+  ports:
+    - name: http
+      port: 4969
+      targetPort: 4969
+  type: ClusterIP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  namespace: tokenvisor
+  name: studio-pdb
+spec:
+  minAvailable: 1 # Ensure at least 1 Pod is always available
+  selector:
+    matchLabels:
+      app: studio

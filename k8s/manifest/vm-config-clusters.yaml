@@ -1,0 +1,765 @@
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMAgent
+metadata:
+  labels:
+    app.kubernetes.io/instance: vmagent-tokenvisor
+    app.kubernetes.io/part-of: vm-operator
+  name: vmagent-agg
+spec:
+  replicaCount: 3
+  # HA Setup (Uncomment for HA)
+  # nodeSelector:
+  #   node-role.kubernetes.io/control-plane: "true"
+  # tolerations:
+  #   - key: node-role.kubernetes.io/control-plane
+  #     operator: Exists
+  #     effect: NoSchedule
+  # affinity:
+  #   podAntiAffinity:
+  #     requiredDuringSchedulingIgnoredDuringExecution:
+  #       - labelSelector:
+  #           matchLabels:
+  #             app.kubernetes.io/instance: vmagent-agg
+  #             app.kubernetes.io/name: vmagent
+  #         topologyKey: "kubernetes.io/hostname"
+  image:
+    repository: victoriametrics/vmagent
+    tag: v1.140.0
+  resources:
+    limits:
+      cpu: 1500m
+      memory: 1500Mi
+    requests:
+      cpu: 500m
+      memory: 500Mi
+  statefulMode: true
+  statefulStorage:
+    volumeClaimTemplate:
+      spec:
+        # storageClassName: local-path
+        storageClassName: openebs-three-replica
+        resources:
+          requests:
+            storage: 2Gi
+  serviceSpec:
+    metadata:
+      name: vmagent-emu-aggregate
+      labels:
+        app.kubernetes.io/instance: vmagent-tokenvisor
+    spec:
+      clusterIP: None
+      publishNotReadyAddresses: true
+      ports:
+        - name: http
+          port: 8429
+          targetPort: 8429
+  remoteWrite:
+    # - url: "http://vminsertinternal-victoria-cluster.tokenvisor.svc:8480/insert/0/prometheus/api/v1/write"
+    #   streamAggrConfig:
+    #     enableWindows: true
+    #     keepInput: true
+    #     rules:
+    #       - match:
+    #           - "llm_token_usage"
+    #           - "embedding_token_usage"
+    #           - "reranker_search_usage"
+    #           - "spent"
+    #         interval: 10s
+    #         without: [service.instance.id]
+    #         outputs: [increase]
+    #         flush_on_shutdown: true
+    - url: "http://vminsertinternal-victoria-cluster.tokenvisor.svc:8480/insert/0/prometheus/api/v1/write"
+      streamAggrConfig:
+        enableWindows: true
+        rules:
+          - match: "flower.task.runtime.seconds_bucket"
+            interval: 1m
+            without: [service.instance.id, worker]
+            outputs: [total]
+            keep_metric_names: true
+
+          - match: '{__name__=~"flower.task.runtime.seconds_(count|sum)"}'
+            interval: 1m
+            without: [service.instance.id, worker]
+            outputs: [total]
+            keep_metric_names: true
+
+          - match: '{__name__=~"http.+_bucket"}'
+            interval: 1m
+            without: [service.instance.id, http.server_name, http.host]
+            outputs: [total]
+            keep_metric_names: true
+
+          - match: '{__name__=~"http.+_(count|sum)"}'
+            interval: 1m
+            without: [service.instance.id, http.server_name, http.host]
+            outputs: [total]
+            keep_metric_names: true
+
+          - match: '{service.name=~"emu|starling", __name__=~"(llm|embed|rerank).+_bucket"}'
+            interval: 1m
+            without: [service.instance.id, service.name]
+            outputs: [total]
+            keep_metric_names: true
+            output_relabel_configs:
+              - target_label: "service.name"
+                replacement: "emu"
+
+          - match: '{service.name=~"emu|starling", __name__=~"(llm|embed|rerank).+_(count|sum)"}'
+            interval: 1m
+            without: [service.instance.id, service.name]
+            outputs: [total]
+            keep_metric_names: true
+            output_relabel_configs:
+              - target_label: "service.name"
+                replacement: "emu"
+
+          - match: "db.client.connections.usage"
+            interval: 1m
+            without: [service.instance.id]
+            outputs: [total]
+            keep_metric_names: true
+
+          - match: "http.server.active_requests"
+            interval: 1m
+            without: [service.instance.id, http.server_name, http.host]
+            outputs: [total]
+            keep_metric_names: true
+
+          - match:
+              - "request_count"
+              - "llm_request_count"
+              - "embed_request_count"
+              - "rerank_request_count"
+            interval: 30s
+            without: [service.instance.id]
+            outputs: [total]
+            keep_metric_names: true
+
+          - match:
+              - "llm_itl_milliseconds"
+              - "llm_tpot_milliseconds"
+              - "llm_ttft_milliseconds"
+              - "embed_completion_time_milliseconds"
+              - "rerank_completion_time_milliseconds"
+            interval: 30s
+            without: [service.instance.id]
+            outputs: [max]
+            keep_metric_names: true
+
+          - match: "deployment_num_replica"
+            interval: 10s
+            without: [service.instance.id, service.name]
+            outputs: [min]
+            keep_metric_names: true
+            output_relabel_configs:
+              - target_label: "service.name"
+                replacement: "emu"
+
+          - match: "model_request_total"
+            interval: 30s
+            without: [service.instance.id]
+            outputs: [total]
+            keep_metric_names: true
+          # - match:
+          #     - "llm_token_usage"
+          #     - "embedding_token_usage"
+          #     - "reranker_search_usage"
+          #     - "spent"
+          #   interval: 10s
+          #   without: [service.instance.id]
+          #   outputs: [total]
+          #   keep_metric_names: true
+          #   flush_on_shutdown: true
+          # output_relabel_configs:
+          #   - action: replace
+          #     source_labels: [__name__]
+          #     regex: "^([^:]+):.*$"
+          #     target_label: __name__
+          #     replacement: "${1}_agg"
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMAgent
+metadata:
+  labels:
+    app.kubernetes.io/instance: vmagent-tokenvisor
+    app.kubernetes.io/part-of: vm-operator
+  name: vmagent
+spec:
+  replicaCount: 3
+  # HA Setup (Uncomment for HA)
+  # nodeSelector:
+  #   node-role.kubernetes.io/control-plane: "true"
+  # tolerations:
+  #   - key: node-role.kubernetes.io/control-plane
+  #     operator: Exists
+  #     effect: NoSchedule
+  # affinity:
+  #   podAntiAffinity:
+  #     requiredDuringSchedulingIgnoredDuringExecution:
+  #       - labelSelector:
+  #           matchLabels:
+  #             app.kubernetes.io/name: vmagent
+  #             app.kubernetes.io/instance: vmagent
+  #         topologyKey: "kubernetes.io/hostname"
+  image:
+    repository: victoriametrics/vmagent
+    tag: v1.140.0
+  serviceScrapeNamespaceSelector:
+    matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: In
+        values:
+          - tokenvisor
+          - dragonfly-operator-system
+          - clickhouse-operator-system
+          - cnpg-operator-system
+          - vm-operator-system
+  serviceScrapeRelabelTemplate:
+    - targetLabel: job
+      replacement: system-monitor
+    - targetLabel: instance
+      sourceLabels: [__meta_kubernetes_endpoint_node_name]
+  # serviceScrapeSelector:
+  #   matchExpressions:
+  #     - key: app.kubernetes.io/instance
+  #       operator: In
+  #       values:
+  #         - vm-service-scrape
+  #     - key: scrape-by
+  #       operator: In
+  #       values:
+  #         - vmagent
+  podScrapeNamespaceSelector:
+    matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: In
+        values:
+          - tokenvisor
+          - cnpg-operator-system
+  # podScrapeSelector:
+  #   matchLabels:
+  #     app.kubernetes.io/instance: vm-podscrape-spec
+  nodeScrapeSelector:
+    matchLabels:
+      app.kubernetes.io/instance: system-monitor
+  resources:
+    limits:
+      cpu: 1500m
+      memory: 1500Mi
+    requests:
+      cpu: 500m
+      memory: 500Mi
+  remoteWrite:
+    - url: "http://vminsertinternal-victoria-cluster-shortterm.tokenvisor.svc:8480/insert/0/prometheus/api/v1/write"
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  labels:
+    app.kubernetes.io/instance: vm-podscrape-spec
+    app.kubernetes.io/part-of: vm-operator
+  name: dragonfly-scrape
+spec:
+  podMetricsEndpoints:
+    - port: admin
+  selector:
+    matchLabels:
+      app: dragonfly
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  labels:
+    app.kubernetes.io/instance: vm-podscrape-spec
+    app.kubernetes.io/part-of: vm-operator
+  name: amd-exporter-amdgpu-metrics-exporter
+spec:
+  podMetricsEndpoints:
+    - port: ""
+      honorLabels: true
+      relabelConfigs:
+        - targetLabel: job
+          replacement: amd-gpu-metrics-exporter
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: metrics-exporter
+  namespaceSelector:
+    any: true
+  jobLabel: app
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  labels:
+    app.kubernetes.io/instance: vm-podscrape-spec
+    app.kubernetes.io/part-of: vm-operator
+  name: nvidia-dcgm-exporter
+spec:
+  podMetricsEndpoints:
+    - port: metrics
+  selector:
+    matchLabels:
+      app: nvidia-dcgm-exporter
+  namespaceSelector:
+    any: true
+  jobLabel: app
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMNodeScrape
+metadata:
+  name: system-monitor-pvc-capacity
+  labels:
+    app.kubernetes.io/part-of: vm-operator
+    app.kubernetes.io/instance: system-monitor
+spec:
+  scheme: https
+  tlsConfig:
+    caFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    insecureSkipVerify: true
+    serverName: localhost
+  bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+  relabelConfigs:
+    - action: labelmap
+      regex: __meta_kubernetes_node_label_(.+)
+    - targetLabel: __address__
+      replacement: kubernetes.default.svc:443
+    - sourceLabels: [__meta_kubernetes_node_name]
+      regex: (.+)
+      targetLabel: __metrics_path__
+      replacement: /api/v1/nodes/$1/proxy/metrics
+    - targetLabel: job
+      replacement: system-monitor
+  metricRelabelConfigs:
+    - sourceLabels: [__name__]
+      regex: "(kubelet_volume_stats_used_bytes|kubelet_volume_stats_capacity_bytes)"
+      action: keep
+    - action: labelkeep
+      regex: __name__|namespace|job|instance|container|pod|persistentvolumeclaim
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMNodeScrape
+metadata:
+  name: system-monitor-network-disk
+  labels:
+    app.kubernetes.io/part-of: vm-operator
+    app.kubernetes.io/instance: system-monitor
+spec:
+  scheme: https
+  tlsConfig:
+    caFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    insecureSkipVerify: true
+    serverName: localhost
+  bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+  path: /metrics/cadvisor
+  relabelConfigs:
+    - action: labelmap
+      regex: __meta_kubernetes_node_label_(.+)
+    - source_labels: [__metrics_path__]
+      target_label: metrics_path
+    - targetLabel: job
+      replacement: system-monitor
+  metricRelabelConfigs:
+    - sourceLabels: [__name__]
+      regex: "(container_fs_reads_bytes_total|container_fs_writes_bytes_total|container_network_receive_bytes_total|container_network_transmit_bytes_total|machine_cpu_cores|machine_memory_bytes)"
+      action: keep
+    - action: labelkeep
+      regex: __name__|namespace|job|instance|container|pod|interface
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMNodeScrape
+metadata:
+  name: system-monitor-cpu-ram
+  labels:
+    app.kubernetes.io/part-of: vm-operator
+    app.kubernetes.io/instance: system-monitor
+spec:
+  scheme: https
+  tlsConfig:
+    caFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    insecureSkipVerify: true
+    serverName: localhost
+  bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+  path: /metrics/resource
+  relabelConfigs:
+    - action: labelmap
+      regex: __meta_kubernetes_node_label_(.+)
+    - source_labels: [__metrics_path__]
+      target_label: metrics_path
+    - targetLabel: job
+      replacement: system-monitor
+  metricRelabelConfigs:
+    - action: labelkeep
+      regex: __name__|namespace|job|instance|container|pod
+    - sourceLabels: [__name__]
+      regex: "(container_memory_working_set_bytes|container_cpu_usage_seconds_total)"
+      action: keep
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: skypilot-vllm-scrape
+  labels:
+    app.kubernetes.io/part-of: vm-operator
+    app.kubernetes.io/instance: vm-pod-scrape
+spec:
+  selector:
+    matchLabels:
+      deployment: skypilot
+      deployment-type: vllm
+  namespaceSelector:
+    matchNames:
+      - skypilot
+  podMetricsEndpoints:
+    - targetPort: 8000
+      relabelConfigs:
+        - source_labels: [__meta_kubernetes_pod_name]
+          action: replace
+          target_label: pod_name
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: clickhouse-keeper-metrics
+  labels:
+    app.kubernetes.io/part-of: vm-operator
+    app.kubernetes.io/instance: vm-pod-scrape
+spec:
+  selector:
+    matchLabels:
+      app: clickhouse-keeper
+  namespaceSelector:
+    matchNames:
+      - tokenvisor
+  podMetricsEndpoints:
+    - port: chk-metrics # please update the port if changed in the clickhouse keeper config
+      relabelConfigs:
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod_name
+        - sourceLabels: [__meta_kubernetes_pod_container_name]
+          targetLabel: container_name
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMCluster
+metadata:
+  labels:
+    app.kubernetes.io/instance: victoria-metrics-cluster-shortterm-tokenvisor
+    app.kubernetes.io/part-of: vm-operator
+  name: victoria-cluster-shortterm
+spec:
+  clusterVersion: v1.140.0-cluster
+  retentionPeriod: "90d"
+  replicationFactor: 2
+  requestsLoadBalancer:
+    enabled: true
+    spec:
+      replicaCount: 2
+      # HA Setup (Uncomment for HA)
+      # nodeSelector:
+      #   node-role.kubernetes.io/control-plane: "true"
+      # tolerations:
+      #   - key: node-role.kubernetes.io/control-plane
+      #     operator: Exists
+      #     effect: NoSchedule
+      # affinity:
+      #   podAntiAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       - labelSelector:
+      #           matchLabels:
+      #             app.kubernetes.io/name: vmclusterlb-vmauth-balancer
+      #             app.kubernetes.io/instance: victoria-cluster-shortterm
+      #         topologyKey: "kubernetes.io/hostname"
+  vmstorage:
+    replicaCount: 2
+    # HA Setup (Uncomment for HA)
+    # nodeSelector:
+    #   node-role.kubernetes.io/control-plane: "true"
+    # tolerations:
+    #   - key: node-role.kubernetes.io/control-plane
+    #     operator: Exists
+    #     effect: NoSchedule
+    # affinity:
+    #   podAntiAffinity:
+    #     requiredDuringSchedulingIgnoredDuringExecution:
+    #       - labelSelector:
+    #           matchLabels:
+    #             app.kubernetes.io/name: vmstorage
+    #             app.kubernetes.io/instance: victoria-cluster-shortterm
+    #         topologyKey: "kubernetes.io/hostname"
+    storageDataPath: "/vm-data"
+    storage:
+      volumeClaimTemplate:
+        spec:
+          # storageClassName: local-path
+          storageClassName: openebs-three-replica
+          resources:
+            requests:
+              storage: "5Gi"
+    resources:
+      limits:
+        cpu: "3"
+        memory: "3Gi"
+      requests:
+        cpu: 500m
+        memory: 500Mi
+  vmselect:
+    replicaCount: 0
+  vminsert:
+    replicaCount: 2
+    # HA Setup (Uncomment for HA)
+    # nodeSelector:
+    #   node-role.kubernetes.io/control-plane: "true"
+    # tolerations:
+    #   - key: node-role.kubernetes.io/control-plane
+    #     operator: Exists
+    #     effect: NoSchedule
+    # affinity:
+    #   podAntiAffinity:
+    #     requiredDuringSchedulingIgnoredDuringExecution:
+    #       - labelSelector:
+    #           matchLabels:
+    #             app.kubernetes.io/name: vminsert
+    #             app.kubernetes.io/instance: victoria-cluster-shortterm
+    #         topologyKey: "kubernetes.io/hostname"
+    resources:
+      limits:
+        cpu: "1"
+        memory: "1Gi"
+      requests:
+        cpu: "0.5"
+        memory: "500Mi"
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMCluster
+metadata:
+  labels:
+    app.kubernetes.io/instance: victoria-metrics-cluster-tokenvisor
+    app.kubernetes.io/part-of: vm-operator
+  name: victoria-cluster
+spec:
+  clusterVersion: v1.140.0-cluster
+  retentionPeriod: "100y"
+  replicationFactor: 2
+  requestsLoadBalancer:
+    enabled: true
+    spec:
+      replicaCount: 2
+      # HA Setup (Uncomment for HA)
+      # nodeSelector:
+      #   node-role.kubernetes.io/control-plane: "true"
+      # tolerations:
+      #   - key: node-role.kubernetes.io/control-plane
+      #     operator: Exists
+      #     effect: NoSchedule
+      # affinity:
+      #   podAntiAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       - labelSelector:
+      #           matchLabels:
+      #             app.kubernetes.io/name: vmclusterlb-vmauth-balancer
+      #             app.kubernetes.io/instance: victoria-cluster
+      #         topologyKey: "kubernetes.io/hostname"
+  vmstorage:
+    replicaCount: 2
+    # HA Setup (Uncomment for HA)
+    # nodeSelector:
+    #   node-role.kubernetes.io/control-plane: "true"
+    # tolerations:
+    #   - key: node-role.kubernetes.io/control-plane
+    #     operator: Exists
+    #     effect: NoSchedule
+    # affinity:
+    #   podAntiAffinity:
+    #     requiredDuringSchedulingIgnoredDuringExecution:
+    #       - labelSelector:
+    #           matchLabels:
+    #             app.kubernetes.io/name: vmstorage
+    #             app.kubernetes.io/instance: victoria-cluster
+    #         topologyKey: "kubernetes.io/hostname"
+    storageDataPath: "/vm-data"
+    storage:
+      volumeClaimTemplate:
+        spec:
+          # storageClassName: local-path
+          storageClassName: openebs-three-replica
+          resources:
+            requests:
+              storage: "10Gi"
+    resources:
+      limits:
+        cpu: "3"
+        memory: "3Gi"
+      requests:
+        cpu: 500m
+        memory: 500Mi
+  vmselect:
+    replicaCount: 2
+    # HA Setup (Uncomment for HA)
+    # nodeSelector:
+    #   node-role.kubernetes.io/control-plane: "true"
+    # tolerations:
+    #   - key: node-role.kubernetes.io/control-plane
+    #     operator: Exists
+    #     effect: NoSchedule
+    # affinity:
+    #   podAntiAffinity:
+    #     requiredDuringSchedulingIgnoredDuringExecution:
+    #       - labelSelector:
+    #           matchLabels:
+    #             app.kubernetes.io/name: vmselect
+    #             app.kubernetes.io/instance: victoria-cluster
+    #         topologyKey: "kubernetes.io/hostname"
+    cacheMountPath: "/select-cache"
+    storage:
+      volumeClaimTemplate:
+        spec:
+          # storageClassName: local-path
+          storageClassName: openebs-three-replica
+          resources:
+            requests:
+              storage: "1Gi"
+    extraArgs:
+      storageNode: "vmstorage-victoria-cluster-0.vmstorage-victoria-cluster.tokenvisor.svc.cluster.local:8401,vmstorage-victoria-cluster-shortterm-0.vmstorage-victoria-cluster-shortterm.tokenvisor.svc.cluster.local:8401,vmstorage-victoria-cluster-1.vmstorage-victoria-cluster.tokenvisor.svc.cluster.local:8401,vmstorage-victoria-cluster-shortterm-1.vmstorage-victoria-cluster-shortterm.tokenvisor.svc.cluster.local:8401"
+      dedup.minScrapeInterval: "30s"
+    resources:
+      limits:
+        cpu: "1"
+        memory: "1Gi"
+      requests:
+        cpu: "0.5"
+        memory: "500Mi"
+  vminsert:
+    replicaCount: 2
+    # HA Setup (Uncomment for HA)
+    # nodeSelector:
+    #   node-role.kubernetes.io/control-plane: "true"
+    # tolerations:
+    #   - key: node-role.kubernetes.io/control-plane
+    #     operator: Exists
+    #     effect: NoSchedule
+    # affinity:
+    #   podAntiAffinity:
+    #     requiredDuringSchedulingIgnoredDuringExecution:
+    #       - labelSelector:
+    #           matchLabels:
+    #             app.kubernetes.io/name: vminsert
+    #             app.kubernetes.io/instance: victoria-cluster
+    #         topologyKey: "kubernetes.io/hostname"
+    resources:
+      limits:
+        cpu: "1"
+        memory: "1Gi"
+      requests:
+        cpu: "0.5"
+        memory: "500Mi"
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMAuth
+metadata:
+  labels:
+    app.kubernetes.io/instance: vmauth-tokenvisor
+    app.kubernetes.io/part-of: vm-operator
+  name: vmauth
+spec:
+  replicaCount: 2
+  # HA Setup (Uncomment for HA)
+  # nodeSelector:
+  #   node-role.kubernetes.io/control-plane: "true"
+  # tolerations:
+  #   - key: node-role.kubernetes.io/control-plane
+  #     operator: Exists
+  #     effect: NoSchedule
+  # affinity:
+  #   podAntiAffinity:
+  #     requiredDuringSchedulingIgnoredDuringExecution:
+  #       - labelSelector:
+  #           matchLabels:
+  #             app.kubernetes.io/name: vmauth
+  #             app.kubernetes.io/instance: vmauth
+  #         topologyKey: "kubernetes.io/hostname"
+  image:
+    repository: victoriametrics/vmauth
+    tag: v1.140.0
+  userSelector:
+    matchLabels:
+      app.kubernetes.io/instance: vmuser-tokenvisor
+  resources:
+    limits:
+      cpu: 1500m
+      memory: 1500Mi
+    requests:
+      cpu: 500m
+      memory: 500Mi
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMUser
+metadata:
+  labels:
+    app.kubernetes.io/instance: vmuser-tokenvisor
+    app.kubernetes.io/part-of: vm-operator
+  name: vmuser
+spec:
+  name: vmuser
+  username: vmuser
+  passwordRef:
+    name: vmuser-secret
+    key: password
+  targetRefs:
+    # vmui + vmselect
+    - crd:
+        kind: VMCluster/vmselect
+        name: victoria-cluster
+        namespace: tokenvisor
+      target_path_suffix: "/select/0"
+      paths:
+        - "/vm/vmui"
+        - "/vm/vmui/.*"
+        - "/vm/prometheus/api/v1/query"
+        - "/vm/prometheus/api/v1/query_range"
+        - "/vm/prometheus/api/v1/series"
+        - "/vm/prometheus/api/v1/status/.*"
+        - "/vm/prometheus/api/v1/label/"
+        - "/vm/prometheus/api/v1/label/[^/]+/values"
+        - "/vm/prometheus/api/v1/status/tsdb"
+        - "/vm/prometheus/api/v1/export"
+        - "/vm/prometheus/api/v1/export/csv"
+      drop_src_path_prefix_parts: 1
+    - crd: # needed for vmui query
+        kind: VMCluster/vmselect
+        name: victoria-cluster
+        namespace: tokenvisor
+      target_path_suffix: "/select/0/prometheus"
+      paths:
+        - "/vm/api/v1/query"
+        - "/vm/api/v1/query_range"
+        - "/vm/api/v1/series"
+        - "/vm/api/v1/status/.*"
+        - "/vm/api/v1/label/"
+        - "/vm/api/v1/label/[^/]+/values"
+        - "/vm/api/v1/status/tsdb"
+        - "/vm/api/v1/export"
+        - "/vm/api/v1/export/csv"
+      drop_src_path_prefix_parts: 1
+    - static:
+        urls:
+          - http://vls-victoria-logs-single-server-0.vls-victoria-logs-single-server.tokenvisor.svc.cluster.local:9428/
+          - http://vls-victoria-logs-single-server-1.vls-victoria-logs-single-server.tokenvisor.svc.cluster.local:9428/
+      drop_src_path_prefix_parts: 1
+      paths:
+        - "/vl/select"
+        - "/vl/select/.*"
+        - "/vl/logsql"
+        - "/vl/logsql/.*"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    app.kubernetes.io/instance: vm-secret-tokenvisor
+    app.kubernetes.io/part-of: vm-operator
+  name: vmuser-secret
+type: Opaque
+data:
+  password: dG9rZW52aXNvci12bS1vcGVyYXRvcg==

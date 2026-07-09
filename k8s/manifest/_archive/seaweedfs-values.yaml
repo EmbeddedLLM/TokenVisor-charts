@@ -1,0 +1,49 @@
+global:
+  monitoring:
+    enabled: true
+  # if enabled will use global.replicationPlacement and override master & filer defaultReplicaPlacement config
+  enableReplication: false
+  #  replication type is XYZ:
+  # X number of replica in other data centers
+  # Y number of replica in other racks in the same data center
+  # Z number of replica in other servers in the same rack
+  replicationPlacement: "001"
+
+# master is the control plane, not storing real data
+master:
+  enabled: true
+  replicas: 1
+  # storageClass can use openebs
+  data:
+    type: "persistentVolumeClaim"
+    size: "5Gi"
+    storageClass: "local-path"
+  logs:
+    type: "persistentVolumeClaim"
+    size: "5Gi"
+    storageClass: "local-path"
+
+# volume is the actual storage components storing real data
+volume:
+  enabled: true
+  replicas: 1
+  dataDirs:
+    - name: data1
+      type: "hostPath"
+      hostPathPrefix: "/home/akk/seaweedfs_vol1"
+      # let server auto decides
+      maxVolumes: 0
+
+filer:
+  enabled: true
+  replicas: 1
+  data:
+    type: "persistentVolumeClaim"
+    size: "25Gi"
+    storageClass: "local-path"
+  logs:
+    type: "persistentVolumeClaim"
+    size: "25Gi"
+    storageClass: "local-path"
+  s3:
+    enabled: false

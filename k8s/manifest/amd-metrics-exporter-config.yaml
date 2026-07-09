@@ -1,0 +1,39 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: amd-metrics-exporter-config
+  namespace: amd-gpu-operator
+data:
+  config.json: |
+    {
+      "GPUConfig": {
+        "Fields": [
+          "GPU_PACKAGE_POWER",
+          "GPU_JUNCTION_TEMPERATURE",
+          "GPU_MEMORY_TEMPERATURE",
+          "GPU_GFX_ACTIVITY",
+          "GPU_UMC_ACTIVITY",
+          "PCIE_SPEED",
+          "PCIE_MAX_SPEED",
+          "PCIE_BANDWIDTH",
+          "GPU_ENERGY_CONSUMED",
+          "GPU_CLOCK",
+          "GPU_TOTAL_VRAM",
+          "GPU_FREE_VRAM",
+          "GPU_USED_VRAM"
+        ],
+        "Labels": [
+          "GPU_UUID",
+          "SERIAL_NUMBER",
+          "GPU_ID",
+          "POD",
+          "CARD_SERIES",
+          "CARD_MODEL",
+          "CARD_VENDOR",
+          "DRIVER_VERSION",
+          "VBIOS_VERSION",
+          "HOSTNAME"
+        ]
+      }
+    }
