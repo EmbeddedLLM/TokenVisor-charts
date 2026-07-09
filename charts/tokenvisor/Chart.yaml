@@ -1,4 +1,3 @@
-# drift test — should be overwritten by the next sync from TokenVisor
 apiVersion: v2
 name: tokenvisor
 description: TokenVisor Helm chart (operators required as pre-requisites)
