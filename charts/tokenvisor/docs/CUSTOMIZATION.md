@@ -257,6 +257,7 @@ studio:
     favicon.svg: "<base64>" # omit a key to keep its chart default
     icon-square.svg: "<base64>"
     icon-landscape.svg: "<base64>"
+    icon-landscape-auth.svg: "<base64>"
 YAML
 ```
 

@@ -261,6 +261,8 @@ studio:
     USE_SECURE_COOKIES: "true"
     ABSOLUTE_AUTH_TIMEOUT: "86400"
     IDLE_AUTH_TIMEOUT: "900"
+    STUDIO_APP_NAME: "TokenVisor"
+    STUDIO_FROM_EMAIL: "no-reply@tokenvisor.ai"
   secret:
     create: false
     existingSecret: studio-secret

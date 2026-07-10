@@ -54,6 +54,9 @@ spec:
               mountPath: /app/static/icon-landscape.svg
               subPath: icon-landscape.svg
             - name: logos-volume
+              mountPath: /app/static/icon-landscape-auth.svg
+              subPath: icon-landscape-auth.svg
+            - name: logos-volume
               mountPath: /app/static/favicon.svg
               subPath: favicon.svg
             - name: logos-volume
