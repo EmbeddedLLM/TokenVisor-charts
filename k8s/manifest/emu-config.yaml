@@ -29,6 +29,7 @@ data:
   EMU_ENABLE_CREDIT_DEDUCTION: "false"
   EMU_ENABLE_CACHE_ISOLATION: "true"
   EMU_ENABLE_BYOK: "true"
+  EMU_PUBLIC_PROFILES: "https://embeddedllm.github.io/TokenVisor-recipes/profiles/latest.json"
   SKYPILOT_API_SERVER_ENDPOINT: "http://skypilot-api-service.skypilot.svc.cluster.local"
   EMU_PRESIDIO_ANALYZER_URL: "http://presidio-analyzer.tokenvisor.svc.cluster.local:3000"
   EMU_PRESIDIO_ANONYMIZER_URL: "http://presidio-anonymizer.tokenvisor.svc.cluster.local:3000"
