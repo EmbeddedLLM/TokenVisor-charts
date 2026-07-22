@@ -369,7 +369,8 @@ network:
     https:
       enabled: false
       port: 443
-      tlsSecretName: "" # required when https.enabled is true; set to the Secret name cert-manager will create
+      tlsSecretName: "" # required when https.enabled is true, set to the TLS Secret name
+      redirect: false # when https.enabled is true, set true to redirect all HTTP traffic to HTTPS (301)
   routes:
     enabled: true
     name: tokenvisor-http-route

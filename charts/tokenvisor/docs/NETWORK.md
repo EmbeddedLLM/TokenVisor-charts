@@ -137,29 +137,20 @@ studio:
     USE_SECURE_COOKIES: "true"
 ```
 
-## HTTP listener
+## HTTP to HTTPS Redirection
 
-The HTTP listener on port 80 is always active regardless of which option you choose. To redirect HTTP to HTTPS when using Option B, configure an `HTTPRoute` with a redirect filter — this is not done automatically by the chart:
+The HTTP listener on port 80 is always active regardless of which option you choose. By default HTTP serves application traffic directly — nothing is redirected. To redirect HTTP to HTTPS, enable it explicitly once HTTPS is set up and your certificate is issuing:
 
 ```yaml
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: tokenvisor-https-redirect
-  namespace: tokenvisor
-spec:
-  parentRefs:
-    - name: cilium-gateway
-      sectionName: http
-  hostnames:
-    - yourdomain.com
-  rules:
-    - filters:
-        - type: RequestRedirect
-          requestRedirect:
-            scheme: https
-            statusCode: 301
+network:
+  gateway:
+    https:
+      enabled: true
+      tlsSecretName: "tokenvisor-tls-secret"
+      redirect: true
 ```
+
+Enable the redirect only after confirming the certificate issues and renews — that way a misconfiguration surfaces before HTTP stops serving traffic directly.
 
 ## Exposing behind a firewall (DNAT / SNAT)
 

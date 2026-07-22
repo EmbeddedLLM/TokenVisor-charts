@@ -1,4 +1,5 @@
 {{- if .Values.network.routes.enabled }}
+{{- $httpsRedirect := and .Values.network.gateway.https.enabled .Values.network.gateway.https.redirect }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -10,6 +11,10 @@ spec:
   parentRefs:
     - name: {{ .Values.network.gateway.name }}
       namespace: {{ include "tokenvisor.namespace" . }}
+{{- if $httpsRedirect }}
+      # Serve application traffic on the HTTPS listener only; HTTP is redirected below.
+      sectionName: https
+{{- end }}
   rules:
     - matches:
         - path:
@@ -67,4 +72,28 @@ spec:
       backendRefs:
         - name: {{ .Values.studio.service.name }}
           port: {{ .Values.studio.service.port | int }}
+{{- if $httpsRedirect }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Values.network.routes.name }}-https-redirect
+  namespace: {{ include "tokenvisor.namespace" . }}
+  labels:
+    {{- include "tokenvisor.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.network.gateway.name }}
+      namespace: {{ include "tokenvisor.namespace" . }}
+      sectionName: http
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+{{- if ne (.Values.network.gateway.https.port | int) 443 }}
+            port: {{ .Values.network.gateway.https.port | int }}
+{{- end }}
+{{- end }}
 {{- end }}
