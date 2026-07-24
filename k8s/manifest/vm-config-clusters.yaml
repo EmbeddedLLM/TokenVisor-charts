@@ -105,7 +105,9 @@ spec:
               - target_label: "service.name"
                 replacement: "emu"
 
-          - match: '{service.name=~"emu|starling", __name__=~"(llm|embed|rerank).+_(count|sum)"}'
+          # Request counters are aggregated by the dedicated 30s rule below. Excluding
+          # them here prevents two cumulative `total` outputs with the same metric name.
+          - match: '{service.name=~"emu|starling", __name__=~"(llm|embed|rerank).+_(count|sum)", __name__!~"(llm|embed|rerank)_request_count"}'
             interval: 1m
             without: [service.instance.id, service.name]
             outputs: [total]
@@ -131,6 +133,7 @@ spec:
               - "llm_request_count"
               - "embed_request_count"
               - "rerank_request_count"
+              - "guard_request_count"
             interval: 30s
             without: [service.instance.id]
             outputs: [total]
