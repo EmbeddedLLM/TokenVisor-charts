@@ -106,6 +106,7 @@ kubectl apply -f cnpg-cluster-deploy.yaml -n tokenvisor
 ### INSTALL Victoria Metrics cluster and log ###
 helm install vls vm/victoria-logs-single -f victoria-logs-single-deploy.yaml -n tokenvisor --version 0.11.19
 kubectl apply -f vm-config-clusters.yaml -n tokenvisor
+kubectl apply -f disk-metrics-exporter.yaml -n tokenvisor
 
 ### INSTALL grafana ###
 kubectl create ns grafana-operator-system

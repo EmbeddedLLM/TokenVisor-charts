@@ -1,0 +1,188 @@
+{{- if .Values.diskMetricsExporter.enabled }}
+{{- $name := default "disk-metrics-exporter" .Values.diskMetricsExporter.name }}
+{{- $namespace := include "tokenvisor.namespace" . }}
+{{- $serviceAccountName := default $name .Values.diskMetricsExporter.serviceAccount.name }}
+{{- $targetNamespace := default $namespace .Values.diskMetricsExporter.targetNamespace }}
+{{- if .Values.diskMetricsExporter.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $serviceAccountName }}
+  namespace: {{ $namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/component: metrics-exporter
+---
+{{- end }}
+{{- if .Values.diskMetricsExporter.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/component: metrics-exporter
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/component: metrics-exporter
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccountName }}
+    namespace: {{ $namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/component: metrics-exporter
+spec:
+  replicas: {{ .Values.diskMetricsExporter.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: metrics-exporter
+    spec:
+      serviceAccountName: {{ $serviceAccountName }}
+      automountServiceAccountToken: true
+{{- include "tokenvisor.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: exporter
+          image: {{ .Values.diskMetricsExporter.image }}
+          imagePullPolicy: {{ .Values.diskMetricsExporter.imagePullPolicy }}
+          env:
+            - name: TARGET_NAMESPACE
+              value: {{ $targetNamespace | quote }}
+            - name: APPROVED_TARGETS
+              value: |
+{{ toPrettyJson .Values.diskMetricsExporter.approvedTargets | nindent 16 }}
+            - name: PORT
+              value: {{ .Values.diskMetricsExporter.port | quote }}
+            - name: COLLECTION_TIMEOUT_SECONDS
+              value: {{ .Values.diskMetricsExporter.collectionTimeoutSeconds | quote }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.diskMetricsExporter.port | int }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+{{- with .Values.diskMetricsExporter.resources }}
+          resources:
+{{- toYaml . | nindent 12 }}
+{{- end }}
+{{- with .Values.diskMetricsExporter.securityContext }}
+          securityContext:
+{{- toYaml . | nindent 12 }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    app: server
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/component: metrics-exporter
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ $name }}
+  ports:
+    - name: metrics
+      port: {{ .Values.diskMetricsExporter.port | int }}
+      targetPort: metrics
+{{- if and .Values.diskMetricsExporter.vmServiceScrape.enabled (.Capabilities.APIVersions.Has "operator.victoriametrics.com/v1beta1") }}
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/component: metrics-exporter
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ $namespace }}
+  selector:
+    matchLabels:
+      app: server
+      app.kubernetes.io/name: {{ $name }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+{{- end }}
+{{- if .Values.diskMetricsExporter.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}-same-namespace
+  namespace: {{ $namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/component: metrics-exporter
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: metrics
+{{- end }}
+{{- end }}

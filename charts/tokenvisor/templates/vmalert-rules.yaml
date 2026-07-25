@@ -22,25 +22,105 @@ spec:
           labels:
             unit: percent
             component: clickhouse
-        - alert: ClickHouseDiskSpaceLow
-          expr: chi_clickhouse_disk_free_percentage < 10
+        - alert: ClickHouseDiskUtilizationWarning
+          expr: (100 - chi_clickhouse_disk_free_percentage) >= 75
+          for: 1h
+          labels:
+            severity: warning
+            component: clickhouse
+            alert_category: disk-utilization
+          annotations:
+            summary: "ClickHouse disk utilization warning"
+            description: >-
+              ClickHouse disk utilization is {{ "{{ $value }}" }}%
+              (warning threshold: 75%).
+        - alert: ClickHouseDiskUtilizationCritical
+          expr: (100 - chi_clickhouse_disk_free_percentage) >= 90
           for: 1h
           labels:
             severity: critical
             component: clickhouse
+            alert_category: disk-utilization
           annotations:
-            summary: "ClickHouse disk space low"
-            description: "ClickHouse disk space below threshold."
-        - alert: PostgreSQLDatabaseSizeTooLarge
+            summary: "ClickHouse disk utilization critical"
+            description: >-
+              ClickHouse disk utilization is {{ "{{ $value }}" }}%
+              (critical threshold: 90%).
+        # PostgreSQL disk utilization alerts
+        - alert: PostgreSQLDiskUtilizationWarning
           expr: |
-            cnpg_pg_database_size_bytes / 1024 ^ 3 > 10
+            (
+              disk_used_bytes{path="/var/lib/postgresql/data"}
+              /
+              disk_capacity_bytes{path="/var/lib/postgresql/data"}
+            ) >= 0.75
+            and disk_collection_success{path="/var/lib/postgresql/data"} == 1
           for: 1h
           labels:
             severity: warning
             component: postgresql
+            alert_category: disk-utilization
           annotations:
-            summary: "PostgreSQL database size exceeded 10 GiB"
-            description: "PostgreSQL database size exceeded threshold."
+            summary: "PostgreSQL disk utilization warning"
+            description: >-
+              PostgreSQL disk utilization is {{ "{{ $value | humanizePercentage }}" }}
+              (warning threshold: 75%).
+        - alert: PostgreSQLDiskUtilizationCritical
+          expr: |
+            (
+              disk_used_bytes{path="/var/lib/postgresql/data"}
+              /
+              disk_capacity_bytes{path="/var/lib/postgresql/data"}
+            ) >= 0.90
+            and disk_collection_success{path="/var/lib/postgresql/data"} == 1
+          for: 1h
+          labels:
+            severity: critical
+            component: postgresql
+            alert_category: disk-utilization
+          annotations:
+            summary: "PostgreSQL disk utilization critical"
+            description: >-
+              PostgreSQL disk utilization is {{ "{{ $value | humanizePercentage }}" }}
+              (critical threshold: 90%).
+
+        # ModelStorage disk utilization alerts
+        - alert: ModelStorageDiskUtilizationWarning
+          expr: |
+            (
+              disk_used_bytes{path="/hf_repo"}
+              /
+              disk_capacity_bytes{path="/hf_repo"}
+            ) >= 0.75
+            and disk_collection_success{path="/hf_repo"} == 1
+          for: 1h
+          labels:
+            severity: warning
+            component: model-storage
+            alert_category: disk-utilization
+          annotations:
+            summary: "Model storage disk utilization warning"
+            description: >-
+              Model storage disk utilization is {{ "{{ $value | humanizePercentage }}" }}
+              (warning threshold: 75%).
+        - alert: ModelStorageDiskUtilizationCritical
+          expr: |
+            (
+              disk_used_bytes{path="/hf_repo"}
+              /
+              disk_capacity_bytes{path="/hf_repo"}
+            ) >= 0.90
+            and disk_collection_success{path="/hf_repo"} == 1
+          for: 1h
+          labels:
+            severity: critical
+            component: model-storage
+            alert_category: disk-utilization
+          annotations:
+            summary: "Model storage disk utilization critical"
+            description: >-
+              Model storage disk utilization is {{ "{{ $value | humanizePercentage }}" }}
+              (critical threshold: 90%).
         - record: vmcluster_disk_usage_percentage
           expr: |
             (
@@ -55,15 +135,30 @@ spec:
           labels:
             unit: percent
             component: vmcluster
-        - alert: VMClusterDiskSpaceHigh
-          expr: vmcluster_disk_usage_percentage > 80
+        - alert: VMClusterDiskUtilizationWarning
+          expr: vmcluster_disk_usage_percentage >= 75
+          for: 1h
+          labels:
+            severity: warning
+            component: vmcluster
+            alert_category: disk-utilization
+          annotations:
+            summary: "VictoriaMetrics cluster disk utilization warning"
+            description: >-
+              VictoriaMetrics cluster disk utilization is {{ "{{ $value }}" }}%
+              (warning threshold: 75%).
+        - alert: VMClusterDiskUtilizationCritical
+          expr: vmcluster_disk_usage_percentage >= 90
           for: 1h
           labels:
             severity: critical
             component: vmcluster
+            alert_category: disk-utilization
           annotations:
-            summary: "VictoriaMetrics cluster disk usage high"
-            description: "VMStorage disk usage above threshold."
+            summary: "VictoriaMetrics cluster disk utilization critical"
+            description: >-
+              VictoriaMetrics cluster disk utilization is {{ "{{ $value }}" }}%
+              (critical threshold: 90%).
 ---
 {{- if .Values.vmalert.enableLogRules }}
 apiVersion: operator.victoriametrics.com/v1beta1
@@ -133,20 +228,71 @@ spec:
           - component="clickhouse"
         receiver: tokenvisor-discord
       - matchers:
+          - component="model-storage"
+        receiver: tokenvisor-discord
+      - matchers:
           - component="tokenvisor-log"
         receiver: tokenvisor-log-discord
   receivers:
     - name: tokenvisor-discord
       discord_configs:
-        - webhook_url: "{{ .Values.vmalert.tokenvisorWebhookUrl }}"
-          title: "TokenVisor Alert"
-          message: "TokenVisor alert triggered."
+        - webhook_url: {{ .Values.vmalert.tokenvisorWebhookUrl | quote }}
+          title: |
+            {{ "{{- if .CommonLabels.component -}}" }}
+              {{ "{{ title .CommonLabels.component }}" }} ALERT
+            {{ "{{- else -}}" }}
+              TokenVisor Alert
+            {{ "{{- end -}}" }}
+
+          message: |
+            {{ "{{- range .Alerts }}" }}
+            {{ "{{- if eq .Status \"firing\" -}}" }}
+            🚨 **ALERT: {{ "{{ .Labels.alertname }}" }}** {{ "{{- if eq .Labels.severity \"critical\" }}" }} @here{{ "{{ end }}" }}
+            **Severity:** {{ "{{ .Labels.severity  }}" }}
+            **Summary:** {{ "{{ .Annotations.summary }}" }}
+            **Description:** {{ "{{ .Annotations.description }}" }}
+            {{ "{{- if .Labels.instance }}" }}
+            **Instance:** {{ "{{ .Labels.instance }}" }}
+            {{ "{{- end }}" }}
+            {{ "{{- if .Labels.hostname }}" }}
+            **Hostname:** {{ "{{ .Labels.hostname }}" }}
+            {{ "{{- end }}" }}
+            {{ "{{- else -}}" }}
+            ✅ **RESOLVED: {{ "{{ .Labels.alertname }}" }}**
+            **Description:** The alert condition has cleared and utilization is back below the configured threshold.
+            {{ "{{ end }}" }}
+            ---
+            {{ "{{ end }}" }}
           send_resolved: true
     - name: tokenvisor-log-discord
       discord_configs:
-        - webhook_url: "{{ .Values.vmalert.tokenvisorLogWebhookUrl }}"
-          title: "TokenVisor Log Alert"
-          message: "TokenVisor log alert triggered."
+        - webhook_url: {{ .Values.vmalert.tokenvisorLogWebhookUrl | quote }}
+          title: |
+            {{ "{{- if .CommonLabels.service_name -}}" }}
+              {{ "{{ title .CommonLabels.service_name }}" }} ALERT
+            {{ "{{- else -}}" }}
+              TokenVisor Alert
+            {{ "{{- end -}}" }}
+          # Labels containing "." are normalized to use "_".
+          message: |
+            {{ "{{- range .Alerts }}" }}
+            {{ "{{ if or (eq .Labels.severity \"critical\") (eq .Labels.severity \"exception\") }}" }}
+            🚨 **ALERT: {{ "{{ .Labels.alertname }}" }}** @here
+            {{ "{{ else }}" }}
+            ⚠️ **WARNING: {{ "{{ .Labels.alertname }}" }}**
+            {{ "{{ end }}" }}
+            **DateTime:** {{ "{{ .StartsAt }}" }}
+            **File:** {{ "{{ .Labels.code_filepath  }}" }}
+            **Function:** {{ "{{ .Labels.code_function }}" }}
+            **Line:** {{ "{{ .Labels.code_lineno }}" }}
+            {{ "{{ if eq .Labels.severity \"exception\" -}}" }}
+            **Message:** {{ "{{ .Labels.exception_message }}" }}
+            **Stacktrace:** {{ "{{ .Labels.exception_stacktrace }}" }}
+            {{ "{{ else -}}" }}
+            **Message:** {{ "{{ .Labels._msg }}" }}
+            {{ "{{- end }}" }}
+            ---
+            {{ "{{ end }}" }}
           send_resolved: false
   inhibit_rules:
     - source_matchers:
@@ -155,5 +301,5 @@ spec:
       target_matchers:
         - severity="warning"
         - component!="tokenvisor-log"
-      equal: ["alertname"]
+      equal: ["component", "alert_category"]
 {{- end }}

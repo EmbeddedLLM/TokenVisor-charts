@@ -22,29 +22,110 @@ spec:
             unit: percent
             component: clickhouse
 
-        # ClickHouse disk space alert, default: 10%
-        - alert: ClickHouseDiskSpaceLow
-          expr: chi_clickhouse_disk_free_percentage < 10
+        # ClickHouse disk utilization alerts
+        - alert: ClickHouseDiskUtilizationWarning
+          expr: (100 - chi_clickhouse_disk_free_percentage) >= 75
+          for: 1h
+          labels:
+            severity: warning
+            component: clickhouse
+            alert_category: disk-utilization
+          annotations:
+            summary: "ClickHouse disk utilization warning on {{ $labels.hostname }}"
+            description: >-
+              ClickHouse disk utilization is {{ $value }}% (warning threshold: 75%).
+
+
+        - alert: ClickHouseDiskUtilizationCritical
+          expr: (100 - chi_clickhouse_disk_free_percentage) >= 90
           for: 1h
           labels:
             severity: critical
             component: clickhouse
+            alert_category: disk-utilization
           annotations:
-            summary: "ClickHouse low disk space on {{ $labels.hostname }}"
-            description: "Only {{ $value }}% free disk space remaining."
+            summary: "ClickHouse disk utilization critical on {{ $labels.hostname }}"
+            description: >-
+              ClickHouse disk utilization is {{ $value }}% (critical threshold: 90%).
 
-        # PostgreSQL database alert
-        # Please edit the size limit that you (default: 10) in terms of GiB
-        - alert: PostgreSQLDatabaseSizeTooLarge
+
+        # PostgreSQL disk utilization alerts
+        - alert: PostgreSQLDiskUtilizationWarning
           expr: |
-            cnpg_pg_database_size_bytes / 1024 ^ 3 > 10
+            (
+              disk_used_bytes{path="/var/lib/postgresql/data"}
+              /
+              disk_capacity_bytes{path="/var/lib/postgresql/data"}
+            ) >= 0.75
+            and disk_collection_success{path="/var/lib/postgresql/data"} == 1
           for: 1h
           labels:
             severity: warning
             component: postgresql
+            alert_category: disk-utilization
           annotations:
-            summary: "PostgreSQL database size exceeded 10 GiB"
-            description: "Database {{ $labels.datname }} size at {{ $value }} GiB in the last hour."
+            summary: "PostgreSQL disk utilization warning"
+            description: >-
+              PostgreSQL disk utilization is {{ $value | humanizePercentage }} (warning threshold: 75%).
+
+
+        - alert: PostgreSQLDiskUtilizationCritical
+          expr: |
+            (
+              disk_used_bytes{path="/var/lib/postgresql/data"}
+              /
+              disk_capacity_bytes{path="/var/lib/postgresql/data"}
+            ) >= 0.90
+            and disk_collection_success{path="/var/lib/postgresql/data"} == 1
+          for: 1h
+          labels:
+            severity: critical
+            component: postgresql
+            alert_category: disk-utilization
+          annotations:
+            summary: "PostgreSQL disk utilization critical"
+            description: >-
+              PostgreSQL disk utilization is {{ $value | humanizePercentage }} (critical threshold: 90%).
+
+
+        # ModelStorage disk utilization alerts
+        - alert: ModelStorageDiskUtilizationWarning
+          expr: |
+            (
+              disk_used_bytes{path="/hf_repo"}
+              /
+              disk_capacity_bytes{path="/hf_repo"}
+            ) >= 0.75
+            and disk_collection_success{path="/hf_repo"} == 1
+          for: 1h
+          labels:
+            severity: warning
+            component: model-storage
+            alert_category: disk-utilization
+          annotations:
+            summary: "Model storage disk utilization warning"
+            description: >-
+              Model storage disk utilization is {{ $value | humanizePercentage }} (warning threshold: 75%).
+
+
+        - alert: ModelStorageDiskUtilizationCritical
+          expr: |
+            (
+              disk_used_bytes{path="/hf_repo"}
+              /
+              disk_capacity_bytes{path="/hf_repo"}
+            ) >= 0.90
+            and disk_collection_success{path="/hf_repo"} == 1
+          for: 1h
+          labels:
+            severity: critical
+            component: model-storage
+            alert_category: disk-utilization
+          annotations:
+            summary: "Model storage disk utilization critical"
+            description: >-
+              Model storage disk utilization is {{ $value | humanizePercentage }} (critical threshold: 90%).
+
 
         # VictoriaMetrics cluster disk usage recording rule
         - record: vmcluster_disk_usage_percentage
@@ -62,16 +143,33 @@ spec:
             unit: percent
             component: vmcluster
 
-        # VictoriaMetrics cluster disk usage alert, default: 80%
-        - alert: VMClusterDiskSpaceHigh
-          expr: vmcluster_disk_usage_percentage > 80
+        # VictoriaMetrics cluster disk utilization alerts
+        - alert: VMClusterDiskUtilizationWarning
+          expr: vmcluster_disk_usage_percentage >= 75
+          for: 1h
+          labels:
+            severity: warning
+            component: vmcluster
+            alert_category: disk-utilization
+          annotations:
+            summary: "VictoriaMetrics cluster disk utilization warning"
+            description: >-
+              VictoriaMetrics cluster disk utilization is {{ $value }}% (warning threshold: 75%).
+
+
+        - alert: VMClusterDiskUtilizationCritical
+          expr: vmcluster_disk_usage_percentage >= 90
           for: 1h
           labels:
             severity: critical
             component: vmcluster
+            alert_category: disk-utilization
           annotations:
-            summary: "VictoriaMetrics cluster high disk usage"
-            description: "VMStorage is using {{ $value }}% of available disk space."
+            summary: "VictoriaMetrics cluster disk utilization critical"
+            description: >-
+              VictoriaMetrics cluster disk utilization is {{ $value }}% (critical threshold: 90%).
+
+
 ---
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMRule
@@ -140,12 +238,19 @@ spec:
       - matchers:
           - component="vmcluster"
         receiver: tokenvisor-discord
+        repeat_interval: 1m
       - matchers:
           - component="postgresql"
         receiver: tokenvisor-discord
+        repeat_interval: 1m
       - matchers:
           - component="clickhouse"
         receiver: tokenvisor-discord
+        repeat_interval: 1m
+      - matchers:
+          - component="model-storage"
+        receiver: tokenvisor-discord
+        repeat_interval: 1m
       - matchers:
           - component="tokenvisor-log"
         receiver: tokenvisor-log-discord
@@ -176,7 +281,7 @@ spec:
             {{- end }}
             {{- else -}}
             ✅ **RESOLVED: {{ .Labels.alertname }}**
-            **Description:** {{ .Annotations.description }}
+            **Description:** The alert condition has cleared and utilization is back below the configured threshold.
             {{ end }}
             ---
             {{ end }}
@@ -220,4 +325,4 @@ spec:
       target_matchers:
         - severity="warning"
         - component!="tokenvisor-log"
-      equal: ["alertname"]
+      equal: ["component", "alert_category"]

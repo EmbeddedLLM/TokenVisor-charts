@@ -459,6 +459,43 @@ cnpg:
     create: false
     data: {}
 
+diskMetricsExporter:
+  enabled: true
+  name: disk-metrics-exporter
+  image: ghcr.io/embeddedllm/disk-metrics-exporter:0.1.1
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  targetNamespace: ""
+  port: 8000
+  collectionTimeoutSeconds: "10"
+  serviceAccount:
+    create: true
+    name: disk-metrics-exporter
+  rbac:
+    create: true
+  vmServiceScrape:
+    enabled: true
+  networkPolicy:
+    enabled: true
+  resources: {}
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65532
+  approvedTargets:
+    - selector: app=emu
+      container: emu
+      paths:
+        - /hf_repo
+    - selector: app.kubernetes.io/name=postgresql,app.kubernetes.io/component=database
+      container: postgres
+      paths:
+        - /var/lib/postgresql/data
+
 dragonfly:
   enabled: true
   replicas: 2
