@@ -1,4 +1,7 @@
 replicaCount: 2
+config:
+  data:
+    INHERITED_LABELS: app.kubernetes.io/*
 monitoring:
   podMonitorEnabled: true
   podMonitorAdditionalLabels:

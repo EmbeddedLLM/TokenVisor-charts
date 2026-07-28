@@ -55,6 +55,9 @@ kubectl create namespace tokenvisor
 # VM will automatically convert these into VM counter part
 kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.87.1/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
 kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.87.1/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml
+# https://github.com/VictoriaMetrics/helm-charts/issues/2838
+kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.87.1/example/prometheus-operator-crd/monitoring.coreos.com_scrapeconfigs.yaml
+kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.87.1/example/prometheus-operator-crd/monitoring.coreos.com_alertmanagerconfigs.yaml
 
 ### INSTALL VM Operator (allow serviceMonitor to be possible) ###
 helm repo add vm https://victoriametrics.github.io/helm-charts/

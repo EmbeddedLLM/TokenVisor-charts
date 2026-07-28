@@ -16,6 +16,7 @@ spec:
     metadata:
       labels:
         app: emu
+        app.kubernetes.io/disk-metrics-target: emu
         app.kubernetes.io/instance: tokenvisor-emu-otel
         app.kubernetes.io/part-of: emu-backend
     spec:

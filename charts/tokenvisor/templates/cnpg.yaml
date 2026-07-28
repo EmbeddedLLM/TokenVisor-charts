@@ -17,6 +17,7 @@ metadata:
   labels:
     app.kubernetes.io/instance: cnpg-tokenvisor
     app.kubernetes.io/part-of: cnpg-cluster
+    app.kubernetes.io/disk-metrics-target: postgresql
 spec:
   instances: {{ .Values.cnpg.instances }}
 {{- if eq (default "ha" .Values.deployment.mode) "ha" }}

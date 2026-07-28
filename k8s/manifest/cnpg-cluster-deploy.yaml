@@ -14,6 +14,7 @@ metadata:
   labels:
     app.kubernetes.io/instance: cnpg-tokenvisor
     app.kubernetes.io/part-of: cnpg-cluster
+    app.kubernetes.io/disk-metrics-target: postgresql
 spec:
   # HA Setup (Uncomment for HA)
   # instances: 3

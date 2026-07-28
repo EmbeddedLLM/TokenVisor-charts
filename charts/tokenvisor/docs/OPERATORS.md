@@ -11,6 +11,10 @@ This chart requires operators to be installed **before** Helm install. The comma
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.87.1/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
 kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.87.1/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml
+# https://github.com/VictoriaMetrics/helm-charts/issues/2838
+kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.87.1/example/prometheus-operator-crd/monitoring.coreos.com_scrapeconfigs.yaml
+kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.87.1/example/prometheus-operator-crd/monitoring.coreos.com_alertmanagerconfigs.yaml
+
 ```
 
 ## Victoria Metrics Operator
@@ -114,6 +118,9 @@ helm install clickhouse-operator clickhouse-operator/altinity-clickhouse-operato
 ```bash
 cat <<'YAML' > cnpg-operator-values.yaml
 replicaCount: 1
+config:
+  data:
+    INHERITED_LABELS: app.kubernetes.io/*
 monitoring:
   podMonitorEnabled: true
   podMonitorAdditionalLabels:

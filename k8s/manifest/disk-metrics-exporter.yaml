@@ -66,14 +66,14 @@ spec:
               value: |
                 [
                   {
-                    "selector": "app=emu",
+                    "selector": "app.kubernetes.io/disk-metrics-target=emu",
                     "container": "emu",
                     "paths": [
                       "/hf_repo"
                     ]
                   },
                   {
-                    "selector": "app.kubernetes.io/name=postgresql,app.kubernetes.io/component=database",
+                    "selector": "app.kubernetes.io/disk-metrics-target=postgresql",
                     "container": "postgres",
                     "paths": [
                       "/var/lib/postgresql/data"
