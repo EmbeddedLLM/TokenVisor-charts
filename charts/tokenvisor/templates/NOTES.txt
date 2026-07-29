@@ -25,5 +25,44 @@ EMU/OTEL notes:
 - OTEL ClickHouse password is read from {{ .Values.emu.secretRefs.clickhouseSecretName }}:{{ .Values.emu.secretRefs.clickhousePasswordKey }}
 - EMU VictoriaMetrics password is read from {{ .Values.emu.secretRefs.vmuserSecretName }}:{{ .Values.emu.secretRefs.vmuserPasswordKey }}
 
+{{- $auditMode := default "opt_out" (get .Values.emu.config "EMU_AUDIT_RECORD_MODE") }}
+{{- if ne $auditMode "off" }}
+Audit storage:
+- Audit record mode is {{ $auditMode }}.
+{{- $missingAuditConfig := list }}
+{{- range $key := list "EMU_AUDIT_S3_ENDPOINT_URL" "EMU_AUDIT_S3_BUCKET" "EMU_AUDIT_S3_REGION" }}
+{{- if empty (get $.Values.emu.config $key) }}
+{{- $missingAuditConfig = append $missingAuditConfig $key }}
+{{- end }}
+{{- end }}
+{{- if $missingAuditConfig }}
+WARNING: Audit capture is enabled but these EMU configuration values are missing: {{ join ", " $missingAuditConfig }}.
+{{- end }}
+{{- $auditCredentialsKnown := false }}
+{{- $auditCredentialsPresent := false }}
+{{- if and .Values.emu.secret.create (not .Values.emu.secret.existingSecret) }}
+{{- $auditCredentialsKnown = true }}
+{{- $auditCredentialsPresent = and
+  (not (empty (get .Values.emu.secret.data "EMU_AUDIT_S3_ACCESS_KEY")))
+  (not (empty (get .Values.emu.secret.data "EMU_AUDIT_S3_SECRET_KEY")))
+}}
+{{- else if and .Values.validation.lookupExistingResources .Values.emu.secret.existingSecret }}
+{{- $emuSecret := lookup "v1" "Secret" (include "tokenvisor.namespace" .) .Values.emu.secret.existingSecret }}
+{{- if $emuSecret }}
+{{- $auditCredentialsKnown = true }}
+{{- $secretData := default dict $emuSecret.data }}
+{{- $auditCredentialsPresent = and
+  (not (empty (get $secretData "EMU_AUDIT_S3_ACCESS_KEY")))
+  (not (empty (get $secretData "EMU_AUDIT_S3_SECRET_KEY")))
+}}
+{{- end }}
+{{- end }}
+{{- if and $auditCredentialsKnown (not $auditCredentialsPresent) }}
+WARNING: Audit capture is enabled but EMU_AUDIT_S3_ACCESS_KEY or EMU_AUDIT_S3_SECRET_KEY is missing.
+{{- else if not $auditCredentialsKnown }}
+WARNING: Audit S3 credentials could not be verified during rendering; confirm both audit credential keys exist in the EMU Secret.
+{{- end }}
+{{- end }}
+
 Topology notes:
 - Switching between HA and single-node modes after install is not supported; reinstall for topology changes.

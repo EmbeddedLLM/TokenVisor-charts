@@ -113,6 +113,8 @@ vmalert:
 
 ## Storage sizes
 
+Use Kubernetes quantities with an explicit unit for every storage size, such as `5Gi`, `100Gi`, or `1Ti`. A bare value such as `30` means 30 bytes, not 30 GiB.
+
 ```yaml
 clickhouse:
   # legacy shared defaults (applies to both keeper/server if component values are empty)
@@ -220,19 +222,7 @@ studio:
     USE_SECURE_COOKIES: "false"
 ```
 
-### Post-install command-style update
-
-Use this when the final endpoint is known only after install (common with NodePort):
-
-```bash
-STUDIO_ADDR="10.42.100.13:38023" # replace with your reachable ip:port
-helm upgrade --install tokenvisor . \
-  -n tokenvisor \
-  --reuse-values \
-  --set-string studio.config.HOST="${STUDIO_ADDR}" \
-  --set-string studio.config.ORIGIN="http://${STUDIO_ADDR}" \
-  --set-string studio.config.USE_SECURE_COOKIES="false"
-```
+If the final endpoint is known only after install, update `.local/studio-values.yaml`, repeat the `values build` command for the deployment mode, and run the normal Helm upgrade command from the [recommended install flow](../README.md#8-install-tokenvisor). Keeping the source file current prevents a later values build from restoring a stale public URL.
 
 ## Studio theme + logos
 

@@ -1,0 +1,91 @@
+# Basic SeaweedFS S3 installation values for chart seaweedfs/seaweedfs 4.39.0.
+#
+# This is a Helm values file, not a manifest for `kubectl apply`.
+#
+# Before installing:
+#   1. Replace CHANGE_ME_* credentials and choose a private bucket name.
+#   2. Ensure the master/filer StorageClass exists.
+#   3. Replace CHANGE_ME_VOLUME_NODE below with the selected Kubernetes Node
+#      name, then mount the intended disk at /data/seaweedfs on that node.
+#
+# Install:
+#   helm repo add seaweedfs https://seaweedfs.github.io/seaweedfs/helm
+#   helm repo update seaweedfs
+#   helm upgrade --install seaweedfs seaweedfs/seaweedfs \
+#     --namespace seaweedfs --create-namespace \
+#     --version 4.39.0 \
+#     -f k8s/manifest/seaweedfs-s3-values.yaml
+#
+# The S3 endpoint inside the cluster is:
+#   http://seaweedfs-s3.seaweedfs.svc.cluster.local:8333
+#
+# This basic example has one SeaweedFS data copy. For non-replicated volume
+# storage and node-loss durability, use two or three distinct volume nodes and
+# set global.seaweedfs.replicationPlacement to "001" or "002" respectively.
+
+global:
+  seaweedfs:
+    monitoring:
+      enabled: true
+    enableReplication: true
+    replicationPlacement: "000"
+
+master:
+  replicas: 1
+  data:
+    type: persistentVolumeClaim
+    size: 5Gi
+    # Use a durable RWO StorageClass for master metadata where available.
+    storageClass: openebs-three-replica
+  logs:
+    type: persistentVolumeClaim
+    size: 5Gi
+    storageClass: openebs-three-replica
+
+volume:
+  replicas: 1
+  affinity: |
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchFields:
+              - key: metadata.name
+                operator: In
+                values:
+                  - CHANGE_ME_VOLUME_NODE
+  dataDirs:
+    - name: data1
+      type: hostPath
+      # This must be the intended mounted disk path on every selected node.
+      hostPathPrefix: /data/seaweedfs
+      # Let SeaweedFS choose the number of logical volumes from available space.
+      maxVolumes: 0
+
+filer:
+  replicas: 1
+  data:
+    type: persistentVolumeClaim
+    size: 25Gi
+    # The default local filer store supports one filer. Multiple filers need a
+    # shared filer metadata store and are intentionally outside this example.
+    storageClass: openebs-three-replica
+  logs:
+    type: persistentVolumeClaim
+    size: 25Gi
+    storageClass: openebs-three-replica
+  s3:
+    # Embed the authenticated S3 gateway in the filer. Do not also set the
+    # standalone top-level s3.enabled=true unless that is deliberate.
+    enabled: true
+    enableAuth: true
+    createBuckets:
+      - name: tokenvisor-audit
+        anonymousRead: false
+
+# The chart creates its S3 configuration Secret from these credentials. Do not
+# commit real values; use a local copy or an existingConfigSecret in production.
+s3:
+  credentials:
+    admin:
+      accessKey: CHANGE_ME_SEAWEEDFS_ACCESS_KEY
+      secretKey: CHANGE_ME_SEAWEEDFS_SECRET_KEY

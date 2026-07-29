@@ -16,28 +16,27 @@ Quick inspect current values:
 kubectl -n tokenvisor get configmap studio-config -o yaml | sed -n '/^data:/,$p'
 ```
 
-Fix for HTTPS domain:
+Fix the source values for an HTTPS domain:
 
-```bash
-helm upgrade --install tokenvisor . \
-  -n tokenvisor \
-  --reuse-values \
-  --set-string studio.config.HOST="studio.example.com" \
-  --set-string studio.config.ORIGIN="https://studio.example.com" \
-  --set-string studio.config.USE_SECURE_COOKIES="true"
+```yaml
+studio:
+  config:
+    HOST: "studio.example.com"
+    ORIGIN: "https://studio.example.com"
+    USE_SECURE_COOKIES: "true"
 ```
 
-Fix for direct HTTP NodePort:
+Or for direct HTTP NodePort:
 
-```bash
-STUDIO_ADDR="10.42.100.13:38023" # replace with your reachable ip:port
-helm upgrade --install tokenvisor . \
-  -n tokenvisor \
-  --reuse-values \
-  --set-string studio.config.HOST="${STUDIO_ADDR}" \
-  --set-string studio.config.ORIGIN="http://${STUDIO_ADDR}" \
-  --set-string studio.config.USE_SECURE_COOKIES="false"
+```yaml
+studio:
+  config:
+    HOST: "10.42.100.13:38023"
+    ORIGIN: "http://10.42.100.13:38023"
+    USE_SECURE_COOKIES: "false"
 ```
+
+Apply the appropriate values to `.local/studio-values.yaml`, repeat the `values build` command for the deployment mode, and run the normal Helm upgrade command from the [recommended install flow](../README.md#8-install-tokenvisor).
 
 ## Pods stuck in Pending
 

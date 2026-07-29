@@ -10,10 +10,13 @@ The helper covers:
 - local app secrets and GHCR pull secrets
 - upstream SkyPilot API server
 - local-path installation for RKE2/dev clusters
-- SeaweedFS CSI model PV/PVC manifests after SeaweedFS is installed
+- external audit S3 configuration or helper-managed bundled SeaweedFS S3 + CSI
+- independent SeaweedFS + CSI installation for RWX model storage
+- SeaweedFS CSI model PV/PVC manifests as a separate optional step
+- deterministic local Helm values assembly
 - readiness checks before installing TokenVisor
 
-The helper intentionally does not install Kubernetes/CNI, OpenEBS, or SeaweedFS.
+The helper intentionally does not install Kubernetes/CNI or OpenEBS.
 
 Run commands from the chart root:
 
@@ -22,15 +25,15 @@ cd charts/tokenvisor
 ./bin/tokenvisor-prereqs --help
 ```
 
-Commands that change the cluster require `--apply`. When `--apply` is omitted, the helper only reviews what it would do or renders the local manifest/value file. Use `--yes` with `--apply` for non-interactive automation.
+Commands that change the cluster require `--apply`. When `--apply` is omitted, the helper only reviews what it would do or renders the local manifest/value file. Use `--yes` to skip the final apply confirmation; interactive setup commands such as `storage audit-s3` and `storage seaweedfs` still require a terminal for their configuration prompts.
 
 ## Failure and rerun behavior
 
 The helper is forward-only. If a step fails, earlier successful steps remain in the cluster. Fix the cause and rerun the same command.
 
-The helper is intended to be safe to rerun on an already bootstrapped or partially bootstrapped cluster. It skips known existing resources where needed, and most apply/install actions use `kubectl apply` or `helm upgrade --install`.
+Most commands are safe to rerun on an already bootstrapped or partially bootstrapped cluster. They skip known existing resources where needed, and most apply/install actions use `kubectl apply` or `helm upgrade --install`.
 
-It is not a rollback or drift-management tool. Immutable Kubernetes field changes, changed Helm values, or manually modified operator installs may still require operator review.
+SeaweedFS topology is the exception. If `.local/seaweedfs-values.yaml` already exists, the helper defaults to preserving it instead of rebuilding topology from fresh defaults. Edit and apply that file manually for an existing installation. The helper is not a rollback or drift-management tool; immutable Kubernetes fields, changed Helm values, and manually modified installs require operator review.
 
 ## Recommended bootstrap flow
 
@@ -50,20 +53,19 @@ cd charts/tokenvisor
 # or:
 ./bin/tokenvisor-prereqs gpu amd --apply
 
-# Storage backend remains an operator decision.
-# If using local-path-backed storage on RKE2/dev clusters, install it before
-# installing SeaweedFS or any other chart that references storageClass: local-path.
-./bin/tokenvisor-prereqs storage local-path --apply
-
-# Install SeaweedFS from docs/SEAWEEDFS.md, or use another RWX backend.
-
-# If using SeaweedFS CSI static PVs for model storage:
-./bin/tokenvisor-prereqs storage model-pvcs --apply
-
 # App secrets.
 ./bin/tokenvisor-prereqs secrets init --interactive
 # view/edit the secrets in .local/tokenvisor-secrets.yaml
 ./bin/tokenvisor-prereqs secrets apply
+
+# Required when enabling inference audit storage: choose external S3 or bundled SeaweedFS.
+./bin/tokenvisor-prereqs storage audit-s3 --apply
+
+# If audit S3 is external but SeaweedFS should provide RWX model storage.
+./bin/tokenvisor-prereqs storage seaweedfs --apply
+
+# Optional after either SeaweedFS installation path: create static RWX model claims.
+./bin/tokenvisor-prereqs storage model-pvcs --apply
 
 # Private GHCR pull secrets.
 export GHCR_USERNAME='<github-username>'
@@ -72,6 +74,12 @@ export GHCR_TOKEN='<github-pat-with-read-packages>'
 
 # SkyPilot API server.
 ./bin/tokenvisor-prereqs skypilot --apply
+
+# After creating .local/studio-values.yaml as shown in README.md:
+./bin/tokenvisor-prereqs values build \
+  .local/audit-s3-values.yaml \
+  .local/studio-values.yaml
+# For single-node, add: --mode single-node
 
 helm dependency update .
 ./bin/tokenvisor-prereqs check
@@ -127,7 +135,27 @@ For RKE2/dev clusters that need `local-path`:
 
 This skips if `StorageClass/local-path` already exists. Otherwise, it installs Rancher local-path-provisioner `v0.0.34`. It does not mark `local-path` as the default StorageClass.
 
-This helper also does not install SeaweedFS yet. SeaweedFS topology has real choices such as hostPath vs. PVC-backed volume servers, node placement, and backing storage class. Follow `docs/SEAWEEDFS.md` first.
+Configure audit S3 storage with:
+
+```bash
+./bin/tokenvisor-prereqs storage audit-s3 --apply
+```
+
+The interactive command starts by asking whether S3 storage is external. The external path renders an EMU values override and patches the two audit S3 keys into the existing `emu-secret`; it does not install SeaweedFS. The bundled path separately prompts for the volume-server count, number of data copies, data directories per server, and `hostPath` or PVC backing. PVC-backed volume data has its own StorageClass and per-directory size. It then installs SeaweedFS with its authenticated filer S3 gateway, creates the audit bucket, and installs the SeaweedFS CSI driver.
+
+Audit storage configuration does not change capture policy. Capture defaults to `opt_out`; set `EMU_AUDIT_RECORD_MODE` explicitly in the TokenVisor values when a different policy is required.
+
+It does not adopt or overwrite manually installed SeaweedFS/CSI Helm releases. It also does not create the RWX model claims automatically: model storage remains an explicit choice.
+
+When audit S3 is external but SeaweedFS should provide RWX model storage, install SeaweedFS and its CSI driver without enabling S3:
+
+```bash
+./bin/tokenvisor-prereqs storage seaweedfs --apply
+```
+
+Do not run `storage seaweedfs` after selecting bundled audit S3. The bundled path already installs the same SeaweedFS release with its S3 gateway enabled, and the helper rejects the standalone command to avoid disabling that gateway accidentally.
+
+For the generated local files, hostPath preparation, and existing-deployment migration, see `docs/SEAWEEDFS.md`. Build the final TokenVisor Helm values file as shown in `README.md`.
 
 After SeaweedFS CSI is installed, create the static model PV/PVC manifests:
 
@@ -149,12 +177,56 @@ Customize them only if needed:
   --apply
 ```
 
-The generated manifest is written to `.local/seaweedfs-model-storage.yaml`. For SeaweedFS CSI static PVs, `--size` is Kubernetes PV/PVC binding metadata; it is not a hard SeaweedFS quota.
+The generated manifest is written to `.local/seaweedfs-model-storage.yaml`. For SeaweedFS CSI static PVs, `--size` is Kubernetes PV/PVC binding metadata; it is not a hard SeaweedFS quota. The PVs do not override replication, so new writes inherit the SeaweedFS filer or master default.
 
 Check storage readiness:
 
 ```bash
 ./bin/tokenvisor-prereqs storage check
+```
+
+## Build TokenVisor Values
+
+The values build requires [Mike Farah `yq` v4](https://github.com/mikefarah/yq#install). For example, install the pinned Linux AMD64 binary without root access:
+
+```bash
+mkdir -p "${HOME}/.local/bin"
+wget \
+  https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 \
+  -O "${HOME}/.local/bin/yq"
+chmod +x "${HOME}/.local/bin/yq"
+export PATH="${HOME}/.local/bin:${PATH}"
+yq --version
+```
+
+Use the official installation instructions for other operating systems and architectures. Add `${HOME}/.local/bin` to your shell profile if it is not already in `PATH`.
+
+After generating the operator values files, merge them into the single Helm override used for installation. Include `.local/audit-s3-values.yaml` only when `storage audit-s3` was configured:
+
+```bash
+./bin/tokenvisor-prereqs values build \
+  .local/audit-s3-values.yaml \
+  .local/studio-values.yaml
+```
+
+For single-node:
+
+```bash
+./bin/tokenvisor-prereqs values build --mode single-node \
+  .local/audit-s3-values.yaml \
+  .local/studio-values.yaml
+```
+
+The command accepts values files in any location, merges them in argument order, and writes `.local/deployed-values.yaml` by default. Use `--output PATH` for another destination and pass the same path to `check --values PATH`. It changes only local files and does not use `--apply`.
+
+Operators using another merge workflow can perform the equivalent operation directly:
+
+```bash
+# Add values.single-node.yaml before the following files only for single-node mode.
+yq eval-all '. as $item ireduce ({}; . * $item)' \
+  .local/audit-s3-values.yaml \
+  .local/studio-values.yaml \
+  > .local/deployed-values.yaml
 ```
 
 ## GPU operators
@@ -209,7 +281,7 @@ For single-node installs:
 TOKENVISOR_MODE=single-node ./bin/tokenvisor-prereqs check
 ```
 
-The check validates local tools, namespaces, Gateway API, required operator CRDs, model PVC, required secrets and keys, the TokenVisor GHCR pull secret, SkyPilot service, and the VictoriaLogs chart dependency. It also reports optional prerequisites such as `local-path`, SeaweedFS CSI, Grafana, Fluent Bit, and GPU operator/runtime pods without failing when they are absent.
+The check validates the final deployment values file, local tools, namespaces, Gateway API, required operator CRDs, model PVC, required secrets and keys, the TokenVisor GHCR pull secret, SkyPilot service, and the VictoriaLogs chart dependency. If audit S3 is configured, it also validates the audit credential keys and bundled SeaweedFS infrastructure. Otherwise it warns to keep audit capture off. It intentionally does not make an S3 object request. It also reports optional prerequisites such as `local-path`, SeaweedFS CSI, Grafana, Fluent Bit, and GPU operator/runtime pods without failing when they are absent. When all checks pass, it prints the complete Helm install/upgrade command. Use `check --values PATH` when the final values file has a custom name or location.
 
 ## SkyPilot
 

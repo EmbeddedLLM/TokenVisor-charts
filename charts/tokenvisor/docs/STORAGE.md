@@ -1,12 +1,12 @@
 # Storage
 
-> **Recommended path:** `./bin/tokenvisor-prereqs storage local-path --apply` or `./bin/tokenvisor-prereqs storage model-pvcs --apply`
+> **Recommended path:** use `storage audit-s3 --apply` only when audit object storage is wanted. If that command uses external S3, run `storage seaweedfs --apply` before `storage model-pvcs --apply` when SeaweedFS-backed RWX model claims are also wanted. The bundled audit path already installs SeaweedFS and CSI.
 >
 > See [PREREQS_HELPER.md](PREREQS_HELPER.md) for all helper options. The manual steps below are for customization beyond the helper defaults.
 
 TokenVisor chart expects storage to already exist. It references storage classes and model PVC settings.
 
-The helper covers `local-path` installation for RKE2/dev clusters and model PV/PVC creation after SeaweedFS CSI exists. It does not install OpenEBS or SeaweedFS. Use the manual sections below for storage backend decisions and customization.
+The helper covers external audit S3 configuration, bundled SeaweedFS S3 + CSI installation, independent SeaweedFS + CSI installation for RWX model storage, and model PV/PVC creation as a separate operation. It does not install OpenEBS. Use the manual sections below for storage backend decisions and customization.
 
 ## What Is Mandatory
 
@@ -109,7 +109,6 @@ spec:
     volumeHandle: seaweedfs-tokenvisor-pv-id
     volumeAttributes:
       collection: default
-      replication: "000"
       path: /shared_hf_repo
       concurrentReaders: "128"
   persistentVolumeReclaimPolicy: Retain
@@ -141,7 +140,6 @@ spec:
     volumeHandle: seaweedfs-skypilot-pv-id
     volumeAttributes:
       collection: default
-      replication: "000"
       path: /shared_hf_repo
       concurrentReaders: "128"
   persistentVolumeReclaimPolicy: Retain
@@ -163,6 +161,8 @@ YAML
 
 kubectl apply -f seaweedfs-model-storage.yaml
 ```
+
+These static PVs intentionally omit the CSI `replication` attribute. Writes therefore use the SeaweedFS filer or master default instead of overriding the cluster's data-copy policy. See [CSI replication behavior](SEAWEEDFS.md#csi-replication-behavior).
 
 ## SeaweedFS Reference
 

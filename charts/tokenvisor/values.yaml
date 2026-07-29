@@ -92,6 +92,7 @@ emu:
         - llm_usage
         - embed_usage
         - rerank_usage
+        - guard_usage
         - deployment_usage
         - emu_traces
         - emu_traces_trace_id_ts

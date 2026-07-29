@@ -133,6 +133,38 @@ kubectl apply -f nfs-csi-storageclass.yaml
 kubectl apply -f nfs-model-storage-pv.yaml
 kubectl apply -f nfs-model-storage-pvc.yaml
 
+### INSTALL SeaweedFS S3 for Audit Records (optional; before TokenVisor) ###
+# This provides S3-compatible storage for EMU audit record media. It does not
+# replace the NFS/RWX model-storage choice above.
+#
+# Copy the example locally, replace CHANGE_ME_* credentials, choose the bucket,
+# and adjust the StorageClass or hostPath. Do not commit real credentials.
+cp seaweedfs-s3-values.yaml /tmp/seaweedfs-s3-values.yaml
+$EDITOR /tmp/seaweedfs-s3-values.yaml
+
+# When using the example hostPath volume data, mount the intended disk at the
+# configured path on this node first, then label the node.
+kubectl label node <seaweedfs-volume-node> tokenvisor.io/seaweedfs-volume=true
+
+helm repo add seaweedfs https://seaweedfs.github.io/seaweedfs/helm
+helm repo update
+helm upgrade --install seaweedfs seaweedfs/seaweedfs \
+  --namespace seaweedfs \
+  --create-namespace \
+  --version 4.39.0 \
+  -f /tmp/seaweedfs-s3-values.yaml
+
+# Before applying emu-secret.yaml and emu-config.yaml below, add these values:
+# emu-secret.yaml stringData:
+#   EMU_AUDIT_S3_ACCESS_KEY: <the SeaweedFS S3 access key>
+#   EMU_AUDIT_S3_SECRET_KEY: <the SeaweedFS S3 secret key>
+# emu-config.yaml data:
+#   EMU_AUDIT_RECORD_MODE: "on"
+#   EMU_AUDIT_S3_ENDPOINT_URL: "http://seaweedfs-s3.seaweedfs.svc.cluster.local:8333"
+#   EMU_AUDIT_S3_BUCKET: "tokenvisor-audit"
+#   EMU_AUDIT_S3_REGION: "us-east-1"
+#   EMU_AUDIT_S3_KEY_PREFIX: "audit-media"
+
 ### INSTALL Tokenvisor ###
 # Configure emu-secrets and emu-config accordingly
 # IMPORTANT: make sure the nfs-model-storage-pvc is created first.
@@ -290,18 +322,20 @@ kubectl create -f https://raw.githubusercontent.com/ROCm/k8s-device-plugin/maste
 kubectl create ns skypilot-amd
 kubectl apply -f skypilot-api-server-deploy-amd.yaml
 
-### Setup seaweedfs for RWX PVC ###
-kubectl create ns seaweedfs
-helm repo add seaweedfs https://seaweedfs.github.io/seaweedfs/helm
-# remember to change the hostPathPrefix in volume
-helm install -n seaweedfs seaweedfs seaweedfs/seaweedfs  -f seaweedfs-values.yaml --version 4.0.402
+### Optional: SeaweedFS CSI for RWX Model PVCs ###
+# Install this only when SeaweedFS is also the chosen RWX backend for model
+# storage. Audit S3 storage above does not require CSI or SeaweedFS PV/PVCs.
 helm repo add seaweedfs-csi-driver https://seaweedfs.github.io/seaweedfs-csi-driver/helm
-helm install -n seaweedfs seaweedfs-csi-driver seaweedfs-csi-driver/seaweedfs-csi-driver --set seaweedfsFiler=seaweedfs-filer.seaweedfs.svc:8888 --set mountService.enabled=true --version 0.2.3
-# manual create PVs and PVCs that uses same path.
-# DO NOT NEED to provision the nfs anymore
-kubectl apply -f seaweedfs-skypilot-pv.yaml
-kubectl apply -n skypilot -f seaweedfs-skypilot-pvc.yaml
-kubectl apply -f seaweedfs-tokenvisor-pv.yaml
-kubectl apply -n tokenvisor -f seaweedfs-tokenvisor-pvc.yaml
+helm repo update
+helm upgrade --install seaweedfs-csi-driver seaweedfs-csi-driver/seaweedfs-csi-driver \
+  --namespace seaweedfs \
+  --version 0.2.30 \
+  --set seaweedfsFiler=seaweedfs-filer.seaweedfs.svc.cluster.local:8888 \
+  --set mountService.enabled=true \
+  --set node.updateStrategy.type=OnDelete
 
+# Create static RWX model PV/PVC pairs only after CSI is ready. For the current
+# maintained workflow use:
+#   cd ../../charts/tokenvisor
+#   ./bin/tokenvisor-prereqs storage model-pvcs --apply
 

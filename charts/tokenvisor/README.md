@@ -82,33 +82,36 @@ This is the recommended standard bootstrap path. Use `docs/PREREQS_HELPER.md` fo
 ./bin/tokenvisor-prereqs gpu amd --apply
 ```
 
-### 4. Prepare Storage
-
-Install or verify your storage backend:
-
-- For OpenEBS/custom storage decisions, see `docs/STORAGE.md`.
-- For SeaweedFS RWX model storage, install SeaweedFS first with `docs/SEAWEEDFS.md`, then create model PV/PVCs with the helper.
-- For RKE2 clusters that need `local-path`, install it before installing any chart that uses `storageClass: local-path`:
+### 4. Create Application Secrets
 
 ```bash
-./bin/tokenvisor-prereqs storage local-path --apply
-```
-
-If using SeaweedFS, follow `docs/SEAWEEDFS.md` after the backing StorageClass exists. Then create the model PV/PVCs:
-
-```bash
-# If using SeaweedFS CSI for model storage.
-./bin/tokenvisor-prereqs storage model-pvcs --apply
-```
-
-### 5. Finish Prerequisites
-
-```bash
-# App secrets and private GHCR pull secrets.
 ./bin/tokenvisor-prereqs secrets init --interactive
 # Review .local/tokenvisor-secrets.yaml if needed.
 ./bin/tokenvisor-prereqs secrets apply
+```
 
+### 5. Configure Storage
+
+Use Kubernetes quantities with an explicit unit for every storage size, such as `5Gi`, `100Gi`, or `1Ti`. A bare value such as `30` means 30 bytes, not 30 GiB.
+
+```bash
+# Only when audit media storage is wanted: choose external S3 or bundled SeaweedFS.
+./bin/tokenvisor-prereqs storage audit-s3 --apply
+
+# If audit S3 is external but SeaweedFS should provide RWX model storage.
+# No need to rerun this if bundled SeaweedFS is selected in `audit-s3`
+./bin/tokenvisor-prereqs storage seaweedfs --apply
+
+# Optional after SeaweedFS installation path: create RWX model claims.
+./bin/tokenvisor-prereqs storage model-pvcs --apply
+```
+
+Skip `storage audit-s3` and keep audit mode `off` when audit media storage is not wanted. See [External S3](docs/SEAWEEDFS.md#external-s3) for a bucket creation example and required permissions. See [Bundled SeaweedFS](docs/SEAWEEDFS.md#bundled-seaweedfs) for topology, durability, existing deployments, and hostPath/PVC choices. For other model-storage backends, see `docs/STORAGE.md`.
+
+### 6. Finish Prerequisites
+
+```bash
+# Private GHCR pull secrets.
 export GHCR_USERNAME='<github-username>'
 export GHCR_TOKEN='<github-pat-with-read-packages>'
 ./bin/tokenvisor-prereqs secrets ghcr --apply
@@ -118,22 +121,16 @@ export GHCR_TOKEN='<github-pat-with-read-packages>'
 ./bin/tokenvisor-prereqs skypilot --sc '<your-storage-class>' --apply
 # If the default storage class is correct:
 # ./bin/tokenvisor-prereqs skypilot --apply
-
-# Chart dependency and final readiness check.
-helm dependency update .
-./bin/tokenvisor-prereqs check
-# if you intend to install single-node version, use this readiness check
-TOKENVISOR_MODE=single-node ./bin/tokenvisor-prereqs check
 ```
 
-`helm dependency update .` downloads chart dependencies into the local ignored `charts/` directory. This repo does not commit generated dependency archives or `Chart.lock`.
-
-### 6. Customize TokenVisor Values
+### 7. Customize TokenVisor Values
 
 At minimum, set Studio public URL values. `HOST` is host or `host:port` with no scheme. `ORIGIN` includes scheme.
 
+Create the Studio values file:
+
 ```bash
-cat > values.studio-access.yaml <<'YAML'
+cat > .local/studio-values.yaml <<'YAML'
 studio:
   config:
     HOST: "studio.example.com"
@@ -142,51 +139,56 @@ studio:
 YAML
 ```
 
-For single-node installs, also use `values.single-node.yaml`.
-
-For broader customization, see:
-
-- `docs/CUSTOMIZATION.md`
-- `docs/SINGLE_NODE.md`
-- `docs/STORAGE.md`
-- `docs/GPU.md`
-- `docs/SKYPILOT.md`
-- `docs/NETWORK.md`
-
-### 7. Install TokenVisor
+After all source values files are ready, build `.local/deployed-values.yaml` once. The command requires [Mike Farah `yq` v4](https://github.com/mikefarah/yq#install) and merges the files in argument order, with later values taking precedence.
 
 HA/default:
 
 ```bash
-helm upgrade --install tokenvisor . \
-  --namespace tokenvisor \
-  --create-namespace \
-  -f values.yaml \
-  -f values.studio-access.yaml
+# Include .local/audit-s3-values.yaml only when storage audit-s3 was configured.
+./bin/tokenvisor-prereqs values build \
+  .local/audit-s3-values.yaml \
+  .local/studio-values.yaml
 ```
 
 Single-node:
 
 ```bash
+# Include .local/audit-s3-values.yaml only when storage audit-s3 was configured.
+./bin/tokenvisor-prereqs values build --mode single-node \
+  .local/audit-s3-values.yaml \
+  .local/studio-values.yaml
+```
+
+`.local/deployed-values.yaml` is the final output values for actual install/upgrade. To change the deployment, edit or regenerate the relevant source values file and repeat this merge.
+
+See [Build TokenVisor Values](docs/PREREQS_HELPER.md#build-tokenvisor-values) for the equivalent manual merge.
+
+### 8. Install TokenVisor
+
+Download the chart dependency and run the final readiness check:
+
+```bash
+helm dependency update .
+
+# HA/default:
+./bin/tokenvisor-prereqs check
+
+# Single-node, instead of the preceding check command:
+# TOKENVISOR_MODE=single-node ./bin/tokenvisor-prereqs check
+```
+
+`helm dependency update .` downloads chart dependencies into the local ignored `charts/` directory. This repo does not commit generated dependency archives or `Chart.lock`.
+
+The check requires the final values file to exist. When it succeeds, it prints this install/upgrade command:
+
+```bash
 helm upgrade --install tokenvisor . \
   --namespace tokenvisor \
   --create-namespace \
-  -f values.yaml \
-  -f values.single-node.yaml \
-  -f values.studio-access.yaml
+  -f .local/deployed-values.yaml
 ```
 
-If you access Studio by direct HTTP NodePort, finalize values after install:
-
-```bash
-STUDIO_ADDR="10.42.100.13:38023" # replace with your reachable ip:port
-helm upgrade --install tokenvisor . \
-  --namespace tokenvisor \
-  --reuse-values \
-  --set-string studio.config.HOST="${STUDIO_ADDR}" \
-  --set-string studio.config.ORIGIN="http://${STUDIO_ADDR}" \
-  --set-string studio.config.USE_SECURE_COOKIES="false"
-```
+For direct HTTP NodePort access, set the reachable address and disable secure cookies in `.local/studio-values.yaml` before building the final values. If the address is known only after the first install, update that source file, repeat `values build`, and run the same Helm upgrade command. See [Studio Public URL](docs/CUSTOMIZATION.md#studio-public-url-required).
 
 ## Post-Install Checks
 
@@ -200,6 +202,15 @@ kubectl -n tokenvisor get httproute
 ```
 
 For debugging, see `docs/TROUBLESHOOTING.md`.
+
+For broader customization, see:
+
+- `docs/CUSTOMIZATION.md`
+- `docs/SINGLE_NODE.md`
+- `docs/STORAGE.md`
+- `docs/GPU.md`
+- `docs/SKYPILOT.md`
+- `docs/NETWORK.md`
 
 ## Reference Docs
 

@@ -10,15 +10,23 @@ SKYPILOT_NAMESPACE="${SKYPILOT_NAMESPACE:-skypilot}"
 REGISTRY_SECRET_NAME="${REGISTRY_SECRET_NAME:-registry-secret}"
 GHCR_SERVER="${GHCR_SERVER:-ghcr.io}"
 TOKENVISOR_MODE="${TOKENVISOR_MODE:-ha}"
+SEAWEEDFS_NAMESPACE="${SEAWEEDFS_NAMESPACE:-seaweedfs}"
+SEAWEEDFS_RELEASE="${SEAWEEDFS_RELEASE:-seaweedfs}"
+SEAWEEDFS_CHART_VERSION="${SEAWEEDFS_CHART_VERSION:-4.39.0}"
+SEAWEEDFS_CSI_CHART_VERSION="${SEAWEEDFS_CSI_CHART_VERSION:-0.2.30}"
+SEAWEEDFS_S3_CONFIG_SECRET="${SEAWEEDFS_S3_CONFIG_SECRET:-${SEAWEEDFS_RELEASE}-s3-config}"
 
 usage() {
   cat <<'EOF'
 Usage:
-  ./bin/tokenvisor-prereqs check
+  ./bin/tokenvisor-prereqs check [--values PATH]
   ./bin/tokenvisor-prereqs platform [--apply] [--yes] [--include-grafana] [--include-fluent]
   ./bin/tokenvisor-prereqs storage check
   ./bin/tokenvisor-prereqs storage local-path [--apply] [--yes]
+  ./bin/tokenvisor-prereqs storage audit-s3 [--apply] [--yes]
+  ./bin/tokenvisor-prereqs storage seaweedfs [--apply] [--yes]
   ./bin/tokenvisor-prereqs storage model-pvcs [--apply] [--yes] [--path PATH] [--size SIZE]
+  ./bin/tokenvisor-prereqs values build [--mode ha|single-node] [--output PATH] VALUES_FILE...
   ./bin/tokenvisor-prereqs gpu check
   ./bin/tokenvisor-prereqs gpu nvidia [--apply] [--yes] [--namespace NAMESPACE]
   ./bin/tokenvisor-prereqs gpu amd [--apply] [--yes] [--namespace NAMESPACE]
@@ -34,7 +42,9 @@ the planned action or render local files only.
 Environment:
   TOKENVISOR_NAMESPACE   TokenVisor namespace (default: tokenvisor)
   SKYPILOT_NAMESPACE     SkyPilot namespace (default: skypilot)
-  TOKENVISOR_MODE        ha or single-node for check output (default: ha)
+  TOKENVISOR_MODE        ha or single-node for values build and check (default: ha)
+  SEAWEEDFS_NAMESPACE    Bundled SeaweedFS namespace (default: seaweedfs)
+  SEAWEEDFS_RELEASE      Bundled SeaweedFS release name (default: seaweedfs)
   REGISTRY_SECRET_NAME   Image pull secret name (default: registry-secret)
   GHCR_USERNAME          GitHub username for secrets ghcr
   GHCR_TOKEN             GitHub token for secrets ghcr
@@ -72,6 +82,32 @@ yaml_quote() {
   printf '"%s"' "${value}"
 }
 
+base64_encode() {
+  printf '%s' "$1" | base64 | tr -d '\n'
+}
+
+base64_decode() {
+  printf '%s' "$1" | base64 --decode
+}
+
+require_yq_v4() {
+  local operation="$1"
+  local yq_version
+
+  require_tool yq
+  yq_version="$(yq --version 2>/dev/null || true)"
+  case "${yq_version}" in
+    *github.com/mikefarah/yq/*"version v4."*) ;;
+    *)
+      die "${operation} requires mikefarah/yq v4: https://github.com/mikefarah/yq#install"
+      ;;
+  esac
+}
+
+require_yq_merge_support() {
+  require_yq_v4 "values build"
+}
+
 url_percent_encode() {
   local value="$1"
   local encoded=""
@@ -103,6 +139,105 @@ require_tool() {
 
 ensure_local_dir() {
   mkdir -p "${LOCAL_DIR}"
+}
+
+run_values_build() {
+  local mode="${TOKENVISOR_MODE}"
+  local output="${LOCAL_DIR}/deployed-values.yaml"
+  local output_dir
+  local temporary_output
+  local values_file
+  local -a values_files=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --mode)
+        [ "$#" -ge 2 ] || die "values build --mode requires ha or single-node"
+        mode="$2"
+        shift
+        ;;
+      --output)
+        [ "$#" -ge 2 ] || die "values build --output requires a path"
+        output="$2"
+        shift
+        ;;
+      -h|--help)
+        cat <<'EOF'
+Usage:
+  ./bin/tokenvisor-prereqs values build [--mode ha|single-node] [--output PATH] VALUES_FILE...
+
+The files are merged in argument order, with later values taking precedence.
+Single-node mode prepends the chart's values.single-node.yaml. The default output
+is .local/deployed-values.yaml.
+EOF
+        return 0
+        ;;
+      --)
+        shift
+        values_files+=("$@")
+        break
+        ;;
+      -*)
+        die "unknown values build option: $1"
+        ;;
+      *)
+        values_files+=("$1")
+        ;;
+    esac
+    shift
+  done
+
+  case "${mode}" in
+    ha) ;;
+    single-node)
+      values_files=("${CHART_DIR}/values.single-node.yaml" "${values_files[@]}")
+      ;;
+    *)
+      die "values build --mode must be ha or single-node"
+      ;;
+  esac
+
+  [ "${#values_files[@]}" -gt 0 ] || die "values build requires at least one values file"
+  for values_file in "${values_files[@]}"; do
+    [ -f "${values_file}" ] || die "values file not found: ${values_file}"
+    [ "${values_file}" != "${output}" ] \
+      || die "the output file cannot also be a values build input: ${output}"
+  done
+
+  require_yq_merge_support
+  output_dir="$(dirname "${output}")"
+  mkdir -p "${output_dir}"
+  temporary_output="$(mktemp "${output}.XXXXXX")"
+
+  info "Building ${output} for ${mode} mode from:"
+  printf '  %s\n' "${values_files[@]}"
+  if ! yq eval-all '. as $item ireduce ({}; . * $item)' \
+    "${values_files[@]}" > "${temporary_output}"; then
+    rm -f "${temporary_output}"
+    die "failed to merge deployment values"
+  fi
+  mv "${temporary_output}" "${output}"
+  info "Wrote ${output}"
+}
+
+run_values() {
+  local subcommand="${1:-}"
+  shift || true
+
+  case "${subcommand}" in
+    build)
+      run_values_build "$@"
+      ;;
+    ""|help|-h|--help)
+      cat <<'EOF'
+Values commands:
+  ./bin/tokenvisor-prereqs values build [--mode ha|single-node] [--output PATH] VALUES_FILE...
+EOF
+      ;;
+    *)
+      die "unknown values subcommand: ${subcommand}"
+      ;;
+  esac
 }
 
 kubectl_ok() {
@@ -180,6 +315,60 @@ check_seaweedfs_csi_driver() {
   kubectl_ok get csidriver seaweedfs-csi-driver
 }
 
+check_audit_s3_values_file() {
+  local values_file="${1:-${LOCAL_DIR}/audit-s3-values.yaml}"
+
+  [ -f "${values_file}" ] \
+    && grep -Eq '^    EMU_AUDIT_S3_ENDPOINT_URL: ".+"$' "${values_file}" \
+    && grep -Eq '^    EMU_AUDIT_S3_BUCKET: ".+"$' "${values_file}" \
+    && grep -Eq '^    EMU_AUDIT_S3_REGION: ".+"$' "${values_file}" \
+    && grep -Eq '^    EMU_AUDIT_S3_KEY_PREFIX: ".*"$' "${values_file}"
+}
+
+check_audit_s3_secret_file() {
+  local secret_file="${1:-${LOCAL_DIR}/audit-s3-secret.yaml}"
+
+  [ -f "${secret_file}" ] \
+    && grep -Eq '^  EMU_AUDIT_S3_ACCESS_KEY: .+$' "${secret_file}" \
+    && grep -Eq '^  EMU_AUDIT_S3_SECRET_KEY: .+$' "${secret_file}"
+}
+
+audit_s3_rendered_files_exist() {
+  [ -e "${LOCAL_DIR}/audit-s3-values.yaml" ] \
+    || [ -e "${LOCAL_DIR}/audit-s3-secret.yaml" ]
+}
+
+audit_s3_endpoint() {
+  local values_file="${1:-${LOCAL_DIR}/audit-s3-values.yaml}"
+
+  sed -n 's/^    EMU_AUDIT_S3_ENDPOINT_URL: "\(.*\)"$/\1/p' "${values_file}"
+}
+
+uses_bundled_audit_s3() {
+  local values_file="${1:-${LOCAL_DIR}/audit-s3-values.yaml}"
+
+  [ -f "${values_file}" ] || return 1
+  [ "$(audit_s3_endpoint "${values_file}")" = \
+    "http://${SEAWEEDFS_RELEASE}-s3.${SEAWEEDFS_NAMESPACE}.svc.cluster.local:8333" ]
+}
+
+check_bundled_seaweedfs_audit_s3() {
+  local endpoint
+  local values_file="${1:-${LOCAL_DIR}/audit-s3-values.yaml}"
+
+  endpoint="$(audit_s3_endpoint "${values_file}")"
+  case "${endpoint}" in
+    "http://${SEAWEEDFS_RELEASE}-s3.${SEAWEEDFS_NAMESPACE}.svc.cluster.local:8333")
+      kubectl_ok -n "${SEAWEEDFS_NAMESPACE}" get configmap "$(seaweedfs_prereq_marker_name)" \
+        && kubectl_ok -n "${SEAWEEDFS_NAMESPACE}" get service "${SEAWEEDFS_RELEASE}-s3" \
+        && kubectl_ok -n "${SEAWEEDFS_NAMESPACE}" get secret "${SEAWEEDFS_S3_CONFIG_SECRET}"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 check_local_path_storage_class() {
   kubectl_ok get storageclass local-path
 }
@@ -194,6 +383,10 @@ check_grafana_secret() {
 
 check_chart_dependency() {
   compgen -G "${CHART_DIR}/charts/victoria-logs-single*" >/dev/null
+}
+
+check_deployed_values_file() {
+  [ -s "$1" ]
 }
 
 check_mode() {
@@ -257,12 +450,31 @@ confirm_apply() {
 }
 
 run_check() {
+  local chart_dir_quoted
   local failed=0
+  local values_file="${LOCAL_DIR}/deployed-values.yaml"
+  local values_file_quoted
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --values)
+        [ "$#" -ge 2 ] || die "check --values requires a path"
+        values_file="$2"
+        shift
+        ;;
+      *)
+        die "unknown check option: $1"
+        ;;
+    esac
+    shift
+  done
 
   check_item "kubectl command" check_tool_item kubectl || failed=1
   check_item "helm command" check_tool_item helm || failed=1
   check_item "TOKENVISOR_MODE is ha or single-node" check_mode || failed=1
   check_item "victoria-logs-single chart dependency" check_chart_dependency || failed=1
+  check_item "deployment values ${values_file}" \
+    check_deployed_values_file "${values_file}" || failed=1
 
   if command -v kubectl >/dev/null 2>&1; then
     info "Kubernetes context: $(kubectl config current-context 2>/dev/null || echo unknown)"
@@ -304,6 +516,14 @@ run_check() {
     check_item "secret/emu-secret" check_secret emu-secret || failed=1
     check_item "secret/emu-secret key EMU_DB_PATH" check_secret_key emu-secret EMU_DB_PATH || failed=1
     check_item "secret/emu-secret key EMU_SERVICE_KEY" check_secret_key emu-secret EMU_SERVICE_KEY || failed=1
+    if check_audit_s3_values_file "${values_file}"; then
+      check_item "secret/emu-secret key EMU_AUDIT_S3_ACCESS_KEY" check_secret_key emu-secret EMU_AUDIT_S3_ACCESS_KEY || failed=1
+      check_item "secret/emu-secret key EMU_AUDIT_S3_SECRET_KEY" check_secret_key emu-secret EMU_AUDIT_S3_SECRET_KEY || failed=1
+      check_item "bundled SeaweedFS audit S3 infrastructure" \
+        check_bundled_seaweedfs_audit_s3 "${values_file}" || failed=1
+    else
+      warn "audit S3 is not configured; set EMU_AUDIT_RECORD_MODE=off until it is ready"
+    fi
     check_item "secret/studio-secret" check_secret studio-secret || failed=1
     check_item "secret/studio-secret key STUDIO_AUTH_SECRET" check_secret_key studio-secret STUDIO_AUTH_SECRET || failed=1
     check_item "GHCR pull secret in ${TOKENVISOR_NAMESPACE}" check_registry_secret "${TOKENVISOR_NAMESPACE}" || failed=1
@@ -328,6 +548,7 @@ run_check() {
     cat <<EOF
 
 See:
+  README.md
   docs/OPERATORS.md
   docs/STORAGE.md
   docs/SECRETS.md
@@ -335,6 +556,17 @@ See:
 EOF
     die "preflight check found missing prerequisites"
   fi
+
+  printf -v chart_dir_quoted '%q' "${CHART_DIR}"
+  printf -v values_file_quoted '%q' "${values_file}"
+  cat <<EOF
+
+Ready to install or upgrade TokenVisor:
+  helm upgrade --install tokenvisor ${chart_dir_quoted} \\
+    --namespace ${TOKENVISOR_NAMESPACE} \\
+    --create-namespace \\
+    -f ${values_file_quoted}
+EOF
 }
 
 namespace_manifest() {
@@ -730,8 +962,7 @@ spec:
     volumeHandle: seaweedfs-tokenvisor-pv-id
     volumeAttributes:
       collection: default
-      replication: "000"
-      path: ${model_path}
+      path: $(yaml_quote "${model_path}")
       concurrentReaders: "128"
   persistentVolumeReclaimPolicy: Retain
   volumeMode: Filesystem
@@ -762,8 +993,7 @@ spec:
     volumeHandle: seaweedfs-skypilot-pv-id
     volumeAttributes:
       collection: default
-      replication: "000"
-      path: ${model_path}
+      path: $(yaml_quote "${model_path}")
       concurrentReaders: "128"
   persistentVolumeReclaimPolicy: Retain
   volumeMode: Filesystem
@@ -789,6 +1019,13 @@ YAML
 run_storage_check() {
   local failed=0
 
+  if check_audit_s3_values_file; then
+    check_item "secret/emu-secret key EMU_AUDIT_S3_ACCESS_KEY" check_secret_key emu-secret EMU_AUDIT_S3_ACCESS_KEY || failed=1
+    check_item "secret/emu-secret key EMU_AUDIT_S3_SECRET_KEY" check_secret_key emu-secret EMU_AUDIT_S3_SECRET_KEY || failed=1
+    check_item "bundled SeaweedFS audit S3 infrastructure" check_bundled_seaweedfs_audit_s3 || failed=1
+  else
+    warn "audit S3 is not configured; set EMU_AUDIT_RECORD_MODE=off until it is ready"
+  fi
   check_item "model PVC in ${TOKENVISOR_NAMESPACE}" check_model_pvc || failed=1
   check_item "model PVC in ${SKYPILOT_NAMESPACE}" check_skypilot_model_pvc || failed=1
 
@@ -805,7 +1042,8 @@ See:
 
 Notes:
   - This helper does not install OpenEBS.
-  - This helper does not install SeaweedFS yet; use docs/SEAWEEDFS.md first.
+  - Audit S3 readiness validates configuration, required Secrets, and bundled infrastructure.
+  - It intentionally does not make an S3 object request; use an operational probe after deployment.
 EOF
     die "storage check found missing prerequisites"
   fi
@@ -894,6 +1132,11 @@ run_storage_model_pvcs() {
     shift
   done
 
+  case "${model_path}" in
+    /*) ;;
+    *) die "--path must be an absolute SeaweedFS path" ;;
+  esac
+
   render_seaweedfs_model_storage "${model_path}" "${size}"
   if [ "${apply}" -ne 1 ]; then
     info "Rendered ${output}. Run with --apply to create/update PVs and PVCs."
@@ -907,6 +1150,790 @@ run_storage_model_pvcs() {
   kubectl apply -f "${output}"
 }
 
+prompt_value() {
+  local label="$1"
+  local default_value="$2"
+  local value
+
+  [ -t 0 ] || die "interactive storage setup requires a terminal"
+  printf '%s [%s]: ' "${label}" "${default_value}" >&2
+  read -r value
+  printf '%s' "${value:-${default_value}}"
+}
+
+prompt_secret() {
+  local label="$1"
+  local value
+
+  [ -t 0 ] || die "interactive storage setup requires a terminal"
+  printf '%s: ' "${label}" >&2
+  read -rs value
+  printf '\n' >&2
+  [ -n "${value}" ] || die "${label} must not be empty"
+  printf '%s' "${value}"
+}
+
+prompt_yes_no() {
+  local label="$1"
+  local answer
+
+  [ -t 0 ] || die "interactive storage setup requires a terminal"
+  while true; do
+    printf '%s [y/N]: ' "${label}" >&2
+    read -r answer
+    case "${answer}" in
+      y|Y|yes|YES)
+        return 0
+        ;;
+      ""|n|N|no|NO)
+        return 1
+        ;;
+      *)
+        warn "Enter y or n."
+        ;;
+    esac
+  done
+}
+
+discover_selectable_volume_nodes() {
+  local -n nodes_ref="$1"
+  local raw_nodes name ready unschedulable taint_effects
+
+  require_tool kubectl
+  raw_nodes="$(
+    kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.spec.unschedulable}{"|"}{range .spec.taints[*]}{.effect}{","}{end}{"\n"}{end}'
+  )" || die "failed to list Kubernetes nodes"
+
+  nodes_ref=()
+  while IFS='|' read -r name ready unschedulable taint_effects; do
+    [ -n "${name}" ] || continue
+    [ "${ready}" = "True" ] || continue
+    [ "${unschedulable}" != "true" ] || continue
+    case ",${taint_effects}," in
+      *,NoSchedule,*|*,NoExecute,*) continue ;;
+    esac
+    nodes_ref+=("${name}")
+  done <<< "${raw_nodes}"
+}
+
+select_volume_nodes() {
+  local required_count="$1"
+  local selection default_selection="" selected_nodes=""
+  local index selected_index selection_position
+  local -a available_nodes selected_indexes
+  local -A seen_indexes=()
+
+  discover_selectable_volume_nodes available_nodes
+  [ "${#available_nodes[@]}" -ge "${required_count}" ] \
+    || die "${required_count} volume-server pods require at least ${required_count} Ready nodes without cordons or hard scheduling taints; found ${#available_nodes[@]}"
+
+  printf '\nAvailable Ready and schedulable volume nodes:\n' >&2
+  for index in "${!available_nodes[@]}"; do
+    printf '  %d) %s\n' "$((index + 1))" "${available_nodes[index]}" >&2
+  done
+  printf '\n' >&2
+
+  if [ "${#available_nodes[@]}" -eq "${required_count}" ]; then
+    for ((index = 1; index <= required_count; index++)); do
+      default_selection+="${default_selection:+,}${index}"
+    done
+    selection="$(
+      prompt_value \
+        "Select exactly ${required_count} volume nodes by number, comma-separated" \
+        "${default_selection}"
+    )"
+  else
+    [ -t 0 ] || die "interactive storage setup requires a terminal"
+    printf 'Select exactly %d volume nodes by number, comma-separated: ' \
+      "${required_count}" >&2
+    read -r selection
+  fi
+
+  selection="${selection//[[:space:]]/}"
+  [[ "${selection}" =~ ^[0-9]+(,[0-9]+)*$ ]] \
+    || die "volume node selection must be comma-separated numbers"
+  IFS=',' read -r -a selected_indexes <<< "${selection}"
+  [ "${#selected_indexes[@]}" -eq "${required_count}" ] \
+    || die "select exactly ${required_count} volume nodes"
+
+  for selection_position in "${!selected_indexes[@]}"; do
+    selected_index="${selected_indexes[selection_position]}"
+    selected_index="$((10#${selected_index}))"
+    selected_indexes[selection_position]="${selected_index}"
+    [ "${selected_index}" -ge 1 ] \
+      && [ "${selected_index}" -le "${#available_nodes[@]}" ] \
+      || die "volume node selection ${selected_index} is out of range"
+    [ -z "${seen_indexes[${selected_index}]+x}" ] \
+      || die "volume node selection must not contain duplicates"
+    seen_indexes["${selected_index}"]=1
+    selected_nodes+="${selected_nodes:+ }${available_nodes[selected_index - 1]}"
+  done
+
+  printf '\nSelected volume nodes:\n' >&2
+  for selected_index in "${selected_indexes[@]}"; do
+    printf '  - %s\n' "${available_nodes[selected_index - 1]}" >&2
+  done
+  printf '%s' "${selected_nodes}"
+}
+
+validate_selected_volume_nodes() {
+  local selected_nodes="$1"
+  local required_count="$2"
+  local node candidate found
+  local -a available_nodes selected
+
+  discover_selectable_volume_nodes available_nodes
+  read -r -a selected <<< "${selected_nodes}"
+  [ "${#selected[@]}" -eq "${required_count}" ] \
+    || die "expected ${required_count} selected volume nodes; found ${#selected[@]}"
+
+  for node in "${selected[@]}"; do
+    found=0
+    for candidate in "${available_nodes[@]}"; do
+      if [ "${node}" = "${candidate}" ]; then
+        found=1
+        break
+      fi
+    done
+    [ "${found}" -eq 1 ] \
+      || die "selected volume node ${node} is no longer Ready and schedulable"
+  done
+}
+
+normalise_host_paths() {
+  local raw_paths="$1"
+  local path normalised=""
+
+  IFS=',' read -r -a paths <<< "${raw_paths}"
+  for path in "${paths[@]}"; do
+    path="$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<< "${path}")"
+    [ -n "${path}" ] || die "host paths must not contain an empty entry"
+    normalised+="${normalised:+,}${path}"
+  done
+  printf '%s' "${normalised}"
+}
+
+validate_unique_host_paths() {
+  local paths="$1"
+  local required_count="$2"
+  local unique_count
+
+  unique_count="$(tr ',' '\n' <<< "${paths}" | sort -u | wc -l | tr -d ' ')"
+  [ "${unique_count}" -eq "${required_count}" ] \
+    || die "each SeaweedFS data directory requires a distinct host path"
+}
+
+validate_positive_integer() {
+  local label="$1"
+  local value="$2"
+
+  case "${value}" in
+    ""|*[!0-9]*) die "${label} must be a positive integer" ;;
+  esac
+  [ "${value}" -ge 1 ] || die "${label} must be at least 1"
+}
+
+validate_s3_key_prefix() {
+  local key_prefix="$1"
+
+  printf '%s' "${key_prefix}" | grep -Eq '^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$' \
+    || die "object key prefix may contain only letters, numbers, '-', '_', and slash-separated non-empty segments"
+}
+
+render_audit_s3_values() {
+  local endpoint="$1"
+  local bucket="$2"
+  local region="$3"
+  local key_prefix="$4"
+  local output="${LOCAL_DIR}/audit-s3-values.yaml"
+
+  ensure_local_dir
+  cat > "${output}" <<YAML
+# Generated by ./bin/tokenvisor-prereqs storage audit-s3.
+# Include this file in the TokenVisor Helm install/upgrade command.
+emu:
+  config:
+    EMU_AUDIT_S3_ENDPOINT_URL: $(yaml_quote "${endpoint}")
+    EMU_AUDIT_S3_BUCKET: $(yaml_quote "${bucket}")
+    EMU_AUDIT_S3_REGION: $(yaml_quote "${region}")
+    EMU_AUDIT_S3_KEY_PREFIX: $(yaml_quote "${key_prefix}")
+YAML
+  info "Wrote ${output}"
+}
+
+render_audit_s3_secret() {
+  local access_key="$1"
+  local secret_key="$2"
+  local output="${LOCAL_DIR}/audit-s3-secret.yaml"
+
+  ensure_local_dir
+  cat > "${output}" <<YAML
+# Generated by ./bin/tokenvisor-prereqs storage audit-s3.
+# Keep this file out of git. It is a JSON merge patch, not a Secret manifest.
+# Applying this patch cannot replace unrelated emu-secret keys.
+data:
+  EMU_AUDIT_S3_ACCESS_KEY: $(base64_encode "${access_key}")
+  EMU_AUDIT_S3_SECRET_KEY: $(base64_encode "${secret_key}")
+YAML
+  chmod 600 "${output}"
+  info "Wrote ${output}"
+}
+
+render_seaweedfs_values() {
+  local -n config="$1"
+  local enable_s3="$2"
+  local bucket="$3"
+  local replication_placement="00$((config[data_copies] - 1))"
+  local output="${LOCAL_DIR}/seaweedfs-values.yaml"
+  local volume_data
+  local volume_node_affinity=""
+  local filer_s3=""
+  local index node path
+  local -a nodes paths
+
+  if [ "${config[volume_mode]}" = "hostpath" ]; then
+    volume_data=""
+    index=1
+    IFS=',' read -r -a paths <<< "${config[volume_paths]}"
+    for path in "${paths[@]}"; do
+      volume_data+="    - name: data${index}
+      type: hostPath
+      hostPathPrefix: $(yaml_quote "${path}")
+      maxVolumes: 0
+"
+      index=$((index + 1))
+    done
+    read -r -a nodes <<< "${config[volume_nodes]}"
+    volume_node_affinity="    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+"
+    for node in "${nodes[@]}"; do
+      volume_node_affinity+="          - matchFields:
+              - key: metadata.name
+                operator: In
+                values:
+                  - $(yaml_quote "${node}")
+"
+    done
+  else
+    volume_data=""
+    for ((index = 1; index <= config[data_dir_count]; index++)); do
+      volume_data+="    - name: data${index}
+      type: persistentVolumeClaim
+      size: $(yaml_quote "${config[volume_size]}")
+      storageClass: $(yaml_quote "${config[volume_storage_class]}")
+      maxVolumes: 0
+"
+    done
+  fi
+
+  if [ "${enable_s3}" -eq 1 ]; then
+    filer_s3="  s3:
+    enabled: true
+    enableAuth: true
+    existingConfigSecret: ${SEAWEEDFS_S3_CONFIG_SECRET}
+    createBuckets:
+      - name: $(yaml_quote "${bucket}")
+        anonymousRead: false"
+  fi
+
+  ensure_local_dir
+  cat > "${output}" <<YAML
+# Generated by ./bin/tokenvisor-prereqs storage seaweedfs or bundled audit-s3.
+# Keep SeaweedFS resource names aligned with the endpoints generated by this helper.
+fullnameOverride: ${SEAWEEDFS_RELEASE}
+
+global:
+  seaweedfs:
+    monitoring:
+      enabled: true
+    enableReplication: true
+    replicationPlacement: "${replication_placement}"
+
+master:
+  replicas: 1
+  data:
+    type: persistentVolumeClaim
+    size: $(yaml_quote "${config[master_size]}")
+    storageClass: $(yaml_quote "${config[metadata_storage_class]}")
+  logs:
+    type: persistentVolumeClaim
+    size: $(yaml_quote "${config[master_size]}")
+    storageClass: $(yaml_quote "${config[metadata_storage_class]}")
+
+volume:
+  replicas: ${config[volume_server_count]}
+  affinity: |
+${volume_node_affinity}    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ template "seaweedfs.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: volume
+          topologyKey: kubernetes.io/hostname
+  dataDirs:
+${volume_data}
+
+filer:
+  replicas: 1
+  data:
+    type: persistentVolumeClaim
+    size: $(yaml_quote "${config[filer_size]}")
+    storageClass: $(yaml_quote "${config[metadata_storage_class]}")
+  logs:
+    type: persistentVolumeClaim
+    size: $(yaml_quote "${config[filer_size]}")
+    storageClass: $(yaml_quote "${config[metadata_storage_class]}")
+${filer_s3}
+YAML
+  info "Wrote ${output}"
+}
+
+render_seaweedfs_s3_config_secret() {
+  local access_key="$1"
+  local secret_key="$2"
+  local output="${LOCAL_DIR}/seaweedfs-s3-config-secret.yaml"
+
+  ensure_local_dir
+  cat > "${output}" <<YAML
+# Generated by ./bin/tokenvisor-prereqs storage audit-s3.
+# This helper-owned Secret gives SeaweedFS and EMU the same durable S3 credentials.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${SEAWEEDFS_S3_CONFIG_SECRET}
+  namespace: ${SEAWEEDFS_NAMESPACE}
+type: Opaque
+stringData:
+  audit_access_key: $(yaml_quote "${access_key}")
+  audit_secret_key: $(yaml_quote "${secret_key}")
+  seaweedfs_s3_config: $(yaml_quote "{\"identities\":[{\"name\":\"tokenvisor-audit\",\"credentials\":[{\"accessKey\":\"${access_key}\",\"secretKey\":\"${secret_key}\"}],\"actions\":[\"Admin\",\"Read\",\"Write\"]}]}")
+YAML
+  chmod 600 "${output}"
+  info "Wrote ${output}"
+}
+
+read_existing_seaweedfs_s3_credentials() {
+  local encoded_access_key encoded_secret_key
+
+  if kubectl_ok -n "${SEAWEEDFS_NAMESPACE}" get secret "${SEAWEEDFS_S3_CONFIG_SECRET}"; then
+    encoded_access_key="$(kubectl -n "${SEAWEEDFS_NAMESPACE}" get secret "${SEAWEEDFS_S3_CONFIG_SECRET}" -o 'jsonpath={.data.audit_access_key}')"
+    encoded_secret_key="$(kubectl -n "${SEAWEEDFS_NAMESPACE}" get secret "${SEAWEEDFS_S3_CONFIG_SECRET}" -o 'jsonpath={.data.audit_secret_key}')"
+  else
+    encoded_access_key="$(kubectl -n "${SEAWEEDFS_NAMESPACE}" get secret "${SEAWEEDFS_RELEASE}-s3-secret" -o 'jsonpath={.data.admin_access_key_id}' 2>/dev/null || true)"
+    encoded_secret_key="$(kubectl -n "${SEAWEEDFS_NAMESPACE}" get secret "${SEAWEEDFS_RELEASE}-s3-secret" -o 'jsonpath={.data.admin_secret_access_key}' 2>/dev/null || true)"
+  fi
+
+  [ -n "${encoded_access_key}" ] && [ -n "${encoded_secret_key}" ] \
+    || die "helper-managed SeaweedFS exists but its S3 credentials could not be recovered"
+  printf '%s\n%s' "$(base64_decode "${encoded_access_key}")" "$(base64_decode "${encoded_secret_key}")"
+}
+
+render_seaweedfs_csi_values() {
+  local output="${LOCAL_DIR}/seaweedfs-csi-values.yaml"
+
+  ensure_local_dir
+  cat > "${output}" <<YAML
+# Generated by ./bin/tokenvisor-prereqs storage seaweedfs or bundled audit-s3.
+seaweedfsFiler: "${SEAWEEDFS_RELEASE}-filer.${SEAWEEDFS_NAMESPACE}.svc.cluster.local:8888"
+mountService:
+  enabled: true
+node:
+  updateStrategy:
+    type: OnDelete
+YAML
+  info "Wrote ${output}"
+}
+
+seaweedfs_prereq_marker_name() {
+  printf '%s' "${SEAWEEDFS_RELEASE}-tokenvisor-prereq"
+}
+
+ensure_seaweedfs_storage_class() {
+  local storage_class="$1"
+
+  if kubectl_ok get storageclass "${storage_class}"; then
+    return 0
+  fi
+  if [ "${storage_class}" = "local-path" ]; then
+    info "StorageClass/local-path is missing; installing the helper-managed local-path provisioner"
+    # The outer audit-s3 command already obtained one explicit confirmation.
+    run_storage_local_path --apply --yes
+    return 0
+  fi
+  die "StorageClass/${storage_class} was not found; create it before rerunning the storage command"
+}
+
+guard_existing_seaweedfs_values() {
+  local output="${LOCAL_DIR}/seaweedfs-values.yaml"
+
+  [ -f "${output}" ] || return 0
+  warn "Existing SeaweedFS configuration found at ${output}."
+  warn "This helper does not safely modify an existing SeaweedFS topology. Edit the file and apply Helm manually if you need a topology change."
+  prompt_yes_no "Replace the existing generated SeaweedFS configuration" \
+    || die "kept ${output}; no SeaweedFS configuration was changed"
+}
+
+prompt_seaweedfs_topology() {
+  local -n config="$1"
+  local index path default_path
+
+  config[metadata_storage_class]="$(prompt_value "StorageClass for SeaweedFS master/filer metadata" "local-path")"
+  config[master_size]="$(prompt_value "SeaweedFS master PVC size" "5Gi")"
+  config[filer_size]="$(prompt_value "SeaweedFS filer PVC size" "25Gi")"
+  info "Each volume-server pod requires a distinct schedulable Kubernetes node."
+  config[volume_server_count]="$(prompt_value "Number of SeaweedFS volume-server pods (one per node)" "1")"
+  validate_positive_integer "volume-server pod count" "${config[volume_server_count]}"
+  config[volume_server_count]="$((10#${config[volume_server_count]}))"
+  config[data_copies]="$(prompt_value "Number of copies for stored data (1, 2, or 3)" "1")"
+  case "${config[data_copies]}" in
+    1|2|3) ;;
+    *) die "data copies must be 1, 2, or 3" ;;
+  esac
+  [ "${config[volume_server_count]}" -ge "${config[data_copies]}" ] \
+    || die "${config[data_copies]} data copies require at least ${config[data_copies]} volume-server pods"
+  config[data_dir_count]="$(prompt_value "Number of data directories per volume-server pod" "1")"
+  validate_positive_integer "data-directory count" "${config[data_dir_count]}"
+  config[data_dir_count]="$((10#${config[data_dir_count]}))"
+
+  if prompt_yes_no "Use hostPath for SeaweedFS volume-server data"; then
+    config[volume_mode]="hostpath"
+    warn "Prepare and mount every backing filesystem before continuing. The helper pins volume-server pods to the selected nodes and configures host-path prefixes."
+    config[volume_paths]=""
+    for ((index = 1; index <= config[data_dir_count]; index++)); do
+      if [ "${config[data_dir_count]}" -eq 1 ]; then
+        default_path="/data/seaweedfs"
+      else
+        default_path="/data/seaweedfs-${index}"
+      fi
+      path="$(
+        prompt_value \
+          "Host-path prefix for data directory ${index} on every selected volume node" \
+          "${default_path}"
+      )"
+      case "${path}" in *,*) die "a host path must not contain a comma" ;; esac
+      path="$(normalise_host_paths "${path}")"
+      case "${path}" in /*) ;; *) die "SeaweedFS host paths must be absolute" ;; esac
+      case "${path}" in
+        /) die "SeaweedFS host-path prefix must not be the filesystem root" ;;
+        *[!a-zA-Z0-9_./-]*) die "SeaweedFS host-path prefixes may contain only letters, numbers, '/', '.', '_', and '-'" ;;
+      esac
+      while [ "${path%/}" != "${path}" ]; do
+        path="${path%/}"
+      done
+      case "${path}/" in */../*) die "SeaweedFS host-path prefixes must not contain '..' segments" ;; esac
+      config[volume_paths]+="${config[volume_paths]:+,}${path}"
+    done
+    validate_unique_host_paths "${config[volume_paths]}" "${config[data_dir_count]}"
+    config[volume_nodes]="$(select_volume_nodes "${config[volume_server_count]}")"
+    config[volume_storage_class]=""
+    config[volume_size]=""
+  else
+    config[volume_mode]="pvc"
+    config[volume_storage_class]="$(prompt_value "StorageClass for SeaweedFS volume-server data" "${config[metadata_storage_class]}")"
+    config[volume_size]="$(prompt_value "PVC size for each volume-server data directory" "100Gi")"
+    config[volume_paths]=""
+    config[volume_nodes]=""
+  fi
+}
+
+apply_bundled_seaweedfs() {
+  local enable_s3="$1"
+  local values_file="${LOCAL_DIR}/seaweedfs-values.yaml"
+  local marker_name metadata_storage_class volume_mode volume_nodes volume_paths
+  local volume_server_count volume_storage_class
+  local -a volume_storage_classes
+
+  require_tool kubectl
+  require_tool helm
+  require_yq_v4 "applying rendered SeaweedFS configuration"
+
+  metadata_storage_class="$(yq eval -r '.master.data.storageClass // ""' "${values_file}")"
+  [ -n "${metadata_storage_class}" ] \
+    || die "rendered SeaweedFS configuration is missing the metadata StorageClass"
+  volume_mode="$(
+    yq eval -r '.volume.dataDirs[].type' "${values_file}" | sort -u
+  )"
+  volume_server_count="$(yq eval -r '.volume.replicas // 0' "${values_file}")"
+
+  case "${volume_mode}" in
+    hostPath)
+      volume_nodes="$(
+        yq eval -r \
+          '.volume.affinity
+            | from_yaml
+            | [.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[]
+              | .matchFields[]?
+              | select(.key == "metadata.name")
+              | .values[]]
+            | join(" ")' \
+          "${values_file}"
+      )"
+      [ -n "${volume_nodes}" ] \
+        || die "rendered hostPath configuration does not contain explicit volume-node affinity; rerun storage setup without --apply"
+      validate_selected_volume_nodes "${volume_nodes}" "${volume_server_count}"
+      volume_paths="$(
+        yq eval -r \
+          '.volume.dataDirs | map(select(.type == "hostPath").hostPathPrefix) | join(",")' \
+          "${values_file}"
+      )"
+      ;;
+    persistentVolumeClaim)
+      mapfile -t volume_storage_classes < <(
+        yq eval -r \
+          '.volume.dataDirs[]
+            | select(.type == "persistentVolumeClaim")
+            | .storageClass' \
+          "${values_file}" \
+          | sort -u
+      )
+      [ "${#volume_storage_classes[@]}" -gt 0 ] \
+        || die "rendered SeaweedFS configuration is missing the volume-data StorageClass"
+      ;;
+    *)
+      die "rendered SeaweedFS data directories must use one supported storage type"
+      ;;
+  esac
+
+  ensure_seaweedfs_storage_class "${metadata_storage_class}"
+  if [ "${volume_mode}" = "persistentVolumeClaim" ]; then
+    for volume_storage_class in "${volume_storage_classes[@]}"; do
+      [ -n "${volume_storage_class}" ] \
+        || die "rendered SeaweedFS configuration contains an empty volume-data StorageClass"
+      ensure_seaweedfs_storage_class "${volume_storage_class}"
+    done
+  fi
+
+  marker_name="$(seaweedfs_prereq_marker_name)"
+  if helm_release_exists "${SEAWEEDFS_RELEASE}" "${SEAWEEDFS_NAMESPACE}" \
+    && ! kubectl_ok -n "${SEAWEEDFS_NAMESPACE}" get configmap "${marker_name}"; then
+    die "SeaweedFS release ${SEAWEEDFS_RELEASE}/${SEAWEEDFS_NAMESPACE} already exists but is not helper-managed; review and reconcile it manually"
+  fi
+  if helm_release_exists seaweedfs-csi-driver "${SEAWEEDFS_NAMESPACE}" \
+    && ! kubectl_ok -n "${SEAWEEDFS_NAMESPACE}" get configmap "${marker_name}"; then
+    die "SeaweedFS CSI release already exists but is not helper-managed; review and reconcile it manually"
+  fi
+
+  apply_namespace "${SEAWEEDFS_NAMESPACE}"
+  kubectl -n "${SEAWEEDFS_NAMESPACE}" create configmap "${marker_name}" \
+    --from-literal=managed-by=tokenvisor-prereqs \
+    --dry-run=client -o yaml | kubectl apply -f -
+  if [ "${enable_s3}" -eq 1 ]; then
+    kubectl apply -f "${LOCAL_DIR}/seaweedfs-s3-config-secret.yaml"
+  fi
+  if [ "${volume_mode}" = "hostPath" ]; then
+    warn "Verify every configured host-path prefix (${volume_paths}) is an intended mounted filesystem on every selected node (${volume_nodes}); the chart stores data under <prefix>/object_store/."
+  fi
+
+  helm repo add seaweedfs https://seaweedfs.github.io/seaweedfs/helm --force-update
+  helm repo add seaweedfs-csi-driver https://seaweedfs.github.io/seaweedfs-csi-driver/helm --force-update
+  helm repo update seaweedfs seaweedfs-csi-driver
+  helm upgrade --install "${SEAWEEDFS_RELEASE}" seaweedfs/seaweedfs \
+    --namespace "${SEAWEEDFS_NAMESPACE}" \
+    --create-namespace \
+    --version "${SEAWEEDFS_CHART_VERSION}" \
+    --timeout 15m \
+    --wait \
+    -f "${LOCAL_DIR}/seaweedfs-values.yaml"
+  helm upgrade --install seaweedfs-csi-driver seaweedfs-csi-driver/seaweedfs-csi-driver \
+    --namespace "${SEAWEEDFS_NAMESPACE}" \
+    --version "${SEAWEEDFS_CSI_CHART_VERSION}" \
+    --timeout 15m \
+    --wait \
+    -f "${LOCAL_DIR}/seaweedfs-csi-values.yaml"
+}
+
+apply_audit_s3_secret() {
+  local output="${LOCAL_DIR}/audit-s3-secret.yaml"
+
+  check_secret emu-secret || die "emu-secret is missing; run secrets apply before storage audit-s3 --apply"
+  kubectl patch secret emu-secret \
+    --namespace "${TOKENVISOR_NAMESPACE}" \
+    --type merge \
+    --patch-file "${output}"
+}
+
+validate_rendered_audit_s3() {
+  check_audit_s3_values_file \
+    && check_audit_s3_secret_file \
+    || die "rendered audit S3 configuration is incomplete; rerun storage audit-s3 without --apply"
+
+  if uses_bundled_audit_s3; then
+    [ -f "${LOCAL_DIR}/seaweedfs-values.yaml" ] \
+      && [ -f "${LOCAL_DIR}/seaweedfs-s3-config-secret.yaml" ] \
+      && [ -f "${LOCAL_DIR}/seaweedfs-csi-values.yaml" ] \
+      || die "rendered bundled SeaweedFS configuration is incomplete; rerun storage audit-s3 without --apply"
+  fi
+}
+
+apply_rendered_audit_s3() {
+  local assume_yes="$1"
+  local access_key existing_credentials secret_key
+  local bundled=0
+
+  validate_rendered_audit_s3
+  if uses_bundled_audit_s3; then
+    bundled=1
+    info "Reusing rendered bundled audit S3 and SeaweedFS configuration."
+  else
+    info "Reusing rendered external audit S3 configuration."
+  fi
+
+  require_tool kubectl
+  check_secret emu-secret \
+    || die "emu-secret is missing; run secrets apply before storage audit-s3 --apply"
+  confirm_apply "audit S3 prerequisites" "${assume_yes}"
+  apply_namespace "${TOKENVISOR_NAMESPACE}"
+
+  if [ "${bundled}" -eq 1 ]; then
+    require_tool helm
+    if helm_release_exists "${SEAWEEDFS_RELEASE}" "${SEAWEEDFS_NAMESPACE}"; then
+      warn "Existing SeaweedFS release detected: changing the default data-copy setting does not retrofit existing data."
+      if kubectl_ok -n "${SEAWEEDFS_NAMESPACE}" get secret "${SEAWEEDFS_S3_CONFIG_SECRET}" \
+        || kubectl_ok -n "${SEAWEEDFS_NAMESPACE}" get secret "${SEAWEEDFS_RELEASE}-s3-secret"; then
+        existing_credentials="$(read_existing_seaweedfs_s3_credentials)"
+        access_key="${existing_credentials%%$'\n'*}"
+        secret_key="${existing_credentials#*$'\n'}"
+        render_seaweedfs_s3_config_secret "${access_key}" "${secret_key}"
+        render_audit_s3_secret "${access_key}" "${secret_key}"
+      fi
+    fi
+    apply_bundled_seaweedfs 1
+  fi
+
+  apply_audit_s3_secret
+  info "Audit S3 prerequisites applied. Build .local/deployed-values.yaml with the values build command in README.md."
+}
+
+run_storage_audit_s3() {
+  local apply=0
+  local assume_yes=0
+  local endpoint bucket region key_prefix access_key secret_key
+  local bundled=0
+  local -A topology=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply)
+        apply=1
+        ;;
+      --yes|-y)
+        assume_yes=1
+        ;;
+      --dry-run)
+        apply=0
+        ;;
+      *)
+        die "unknown storage audit-s3 option: $1"
+        ;;
+    esac
+    shift
+  done
+
+  if [ "${apply}" -eq 1 ] && audit_s3_rendered_files_exist; then
+    apply_rendered_audit_s3 "${assume_yes}"
+    return 0
+  fi
+
+  if prompt_yes_no "Use external S3-compatible storage"; then
+    endpoint="$(prompt_value "S3 endpoint URL" "https://s3.example.com")"
+    bucket="$(prompt_value "Audit bucket" "tokenvisor-audit")"
+    region="$(prompt_value "S3 region" "us-east-1")"
+    key_prefix="$(prompt_value "Object key prefix" "audit-media")"
+    access_key="$(prompt_secret "S3 access key")"
+    secret_key="$(prompt_secret "S3 secret key")"
+  else
+    bundled=1
+    info "Bundled SeaweedFS installs an authenticated in-cluster S3 endpoint and its CSI driver."
+    guard_existing_seaweedfs_values
+    prompt_seaweedfs_topology topology
+    bucket="$(prompt_value "Audit bucket" "tokenvisor-audit")"
+    region="us-east-1"
+    key_prefix="audit-media"
+    access_key="$(random_hex)"
+    secret_key="$(random_hex)"
+    endpoint="http://${SEAWEEDFS_RELEASE}-s3.${SEAWEEDFS_NAMESPACE}.svc.cluster.local:8333"
+
+    render_seaweedfs_values topology 1 "${bucket}"
+    render_seaweedfs_s3_config_secret "${access_key}" "${secret_key}"
+    render_seaweedfs_csi_values
+  fi
+
+  validate_s3_key_prefix "${key_prefix}"
+
+  render_audit_s3_values "${endpoint}" "${bucket}" "${region}" "${key_prefix}"
+  render_audit_s3_secret "${access_key}" "${secret_key}"
+
+  if [ "${apply}" -ne 1 ]; then
+    if [ "${bundled}" -eq 1 ]; then
+      cat <<EOF
+Bundled audit S3 configuration was rendered. To use it:
+  1. Run this command again with --apply to install SeaweedFS ${SEAWEEDFS_CHART_VERSION}
+     and its CSI driver ${SEAWEEDFS_CSI_CHART_VERSION}, then patch the audit S3 credentials.
+  2. Build .local/deployed-values.yaml with the values build command in README.md.
+EOF
+    else
+      cat <<'EOF'
+External audit S3 configuration was rendered. To use it:
+  1. Run this command again with --apply to patch the audit S3 credentials.
+  2. Build .local/deployed-values.yaml with the values build command in README.md.
+EOF
+    fi
+    return 0
+  fi
+
+  apply_rendered_audit_s3 "${assume_yes}"
+}
+
+run_storage_seaweedfs() {
+  local apply=0
+  local assume_yes=0
+  local -A topology=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply)
+        apply=1
+        ;;
+      --yes|-y)
+        assume_yes=1
+        ;;
+      --dry-run)
+        apply=0
+        ;;
+      *)
+        die "unknown storage seaweedfs option: $1"
+        ;;
+    esac
+    shift
+  done
+
+  if uses_bundled_audit_s3; then
+    die "bundled audit S3 already uses this SeaweedFS release; storage seaweedfs would disable its S3 gateway"
+  fi
+  guard_existing_seaweedfs_values
+  info "This installs SeaweedFS and its CSI driver for RWX model storage without enabling S3."
+  prompt_seaweedfs_topology topology
+  render_seaweedfs_values topology 0 ""
+  render_seaweedfs_csi_values
+
+  if [ "${apply}" -ne 1 ]; then
+    cat <<EOF
+SeaweedFS configuration was rendered. Run this command again with --apply to install
+SeaweedFS ${SEAWEEDFS_CHART_VERSION} and its CSI driver ${SEAWEEDFS_CSI_CHART_VERSION}.
+After installation, run storage model-pvcs separately to create RWX model claims.
+EOF
+    return 0
+  fi
+
+  require_tool kubectl
+  confirm_apply "SeaweedFS and its CSI driver" "${assume_yes}"
+  apply_bundled_seaweedfs 0
+  info "SeaweedFS and its CSI driver are installed. Run storage model-pvcs if RWX model claims are needed."
+}
+
 run_storage() {
   local subcommand="${1:-}"
   shift || true
@@ -918,6 +1945,12 @@ run_storage() {
     local-path)
       run_storage_local_path "$@"
       ;;
+    audit-s3)
+      run_storage_audit_s3 "$@"
+      ;;
+    seaweedfs)
+      run_storage_seaweedfs "$@"
+      ;;
     model-pvcs)
       run_storage_model_pvcs "$@"
       ;;
@@ -926,11 +1959,14 @@ run_storage() {
 Storage commands:
   ./bin/tokenvisor-prereqs storage check
   ./bin/tokenvisor-prereqs storage local-path [--apply] [--yes]
+  ./bin/tokenvisor-prereqs storage audit-s3 [--apply] [--yes]
+  ./bin/tokenvisor-prereqs storage seaweedfs [--apply] [--yes]
   ./bin/tokenvisor-prereqs storage model-pvcs [--apply] [--yes] [--path PATH] [--size SIZE]
 
 Notes:
   - OpenEBS is not installed by this helper.
-  - SeaweedFS is not installed by this helper yet; use docs/SEAWEEDFS.md.
+  - audit-s3 configures external S3 or installs helper-managed bundled SeaweedFS + CSI.
+  - seaweedfs installs SeaweedFS + CSI without enabling S3.
   - model-pvcs assumes SeaweedFS CSI is already installed.
 EOF
       ;;
@@ -1717,6 +2753,9 @@ main() {
       ;;
     storage)
       run_storage "$@"
+      ;;
+    values)
+      run_values "$@"
       ;;
     gpu)
       run_gpu "$@"
