@@ -210,6 +210,7 @@ For broader customization, see:
 - `docs/STORAGE.md`
 - `docs/GPU.md`
 - `docs/SKYPILOT.md`
+- `docs/LLMD.md`
 - `docs/NETWORK.md`
 
 ## Reference Docs

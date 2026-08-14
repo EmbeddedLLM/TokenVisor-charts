@@ -7,6 +7,8 @@ LOCAL_DIR="${CHART_DIR}/.local"
 SECRETS_FILE="${LOCAL_DIR}/tokenvisor-secrets.yaml"
 TOKENVISOR_NAMESPACE="${TOKENVISOR_NAMESPACE:-tokenvisor}"
 SKYPILOT_NAMESPACE="${SKYPILOT_NAMESPACE:-skypilot}"
+LLMD_NAMESPACE="${LLMD_NAMESPACE:-llm-d}"
+GAIE_VERSION="${GAIE_VERSION:-v1.5.0}"
 REGISTRY_SECRET_NAME="${REGISTRY_SECRET_NAME:-registry-secret}"
 GHCR_SERVER="${GHCR_SERVER:-ghcr.io}"
 TOKENVISOR_MODE="${TOKENVISOR_MODE:-ha}"
@@ -42,6 +44,8 @@ the planned action or render local files only.
 Environment:
   TOKENVISOR_NAMESPACE   TokenVisor namespace (default: tokenvisor)
   SKYPILOT_NAMESPACE     SkyPilot namespace (default: skypilot)
+  LLMD_NAMESPACE         llm-d namespace (default: llm-d)
+  GAIE_VERSION           Gateway API Inference Extension release (default: v1.5.0)
   TOKENVISOR_MODE        ha or single-node for values build and check (default: ha)
   SEAWEEDFS_NAMESPACE    Bundled SeaweedFS namespace (default: seaweedfs)
   SEAWEEDFS_RELEASE      Bundled SeaweedFS release name (default: seaweedfs)
@@ -311,6 +315,10 @@ check_skypilot_model_pvc() {
   kubectl_ok -n "${SKYPILOT_NAMESPACE}" get pvc nfs-model-storage-pvc
 }
 
+check_llmd_model_pvc() {
+  kubectl_ok -n "${LLMD_NAMESPACE}" get pvc nfs-model-storage-pvc
+}
+
 check_seaweedfs_csi_driver() {
   kubectl_ok get csidriver seaweedfs-csi-driver
 }
@@ -481,10 +489,12 @@ run_check() {
     check_item "node count for ${TOKENVISOR_MODE} mode" check_node_count || failed=1
     check_item "namespace/${TOKENVISOR_NAMESPACE}" check_namespace "${TOKENVISOR_NAMESPACE}" || failed=1
     check_item "namespace/${SKYPILOT_NAMESPACE}" check_namespace "${SKYPILOT_NAMESPACE}" || failed=1
+    check_item "namespace/${LLMD_NAMESPACE}" check_namespace "${LLMD_NAMESPACE}" || failed=1
     check_item "Gateway API GatewayClass CRD" check_crd gatewayclasses.gateway.networking.k8s.io || failed=1
     check_item "Gateway API Gateway CRD" check_crd gateways.gateway.networking.k8s.io || failed=1
     check_item "Gateway API HTTPRoute CRD" check_crd httproutes.gateway.networking.k8s.io || failed=1
     check_item "GatewayClass/cilium" kubectl_ok get gatewayclass cilium || failed=1
+    check_item "InferencePool CRD (llm-d)" check_crd inferencepools.inference.networking.k8s.io || failed=1
 
     check_item "ServiceMonitor CRD" check_crd servicemonitors.monitoring.coreos.com || failed=1
     check_item "PodMonitor CRD" check_crd podmonitors.monitoring.coreos.com || failed=1
@@ -533,6 +543,7 @@ run_check() {
     check_optional_item "StorageClass/local-path" check_local_path_storage_class
     check_optional_item "SeaweedFS CSI driver" check_seaweedfs_csi_driver
     check_optional_item "model PVC in ${SKYPILOT_NAMESPACE}" check_skypilot_model_pvc
+    check_optional_item "model PVC in ${LLMD_NAMESPACE}" check_llmd_model_pvc
     check_optional_item "Grafana Operator CRD" check_crd grafanas.grafana.integreatly.org
     check_optional_item "Grafana admin secret" check_grafana_secret
     check_optional_item "Fluent Bit CRD" check_crd fluentbits.fluentbit.fluent.io
@@ -603,6 +614,11 @@ apply_gateway_api_crds() {
   kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/standard/gateway.networking.k8s.io_referencegrants.yaml
   kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/standard/gateway.networking.k8s.io_grpcroutes.yaml
   kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.0/config/crd/experimental/gateway.networking.k8s.io_tlsroutes.yaml
+}
+
+apply_inference_extension_crds() {
+  info "Applying Gateway API Inference Extension CRDs (${GAIE_VERSION})"
+  kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${GAIE_VERSION}/v1-manifests.yaml"
 }
 
 ensure_cilium_gateway_class() {
@@ -852,8 +868,9 @@ platform_plan() {
 
   cat <<EOF
 Platform will:
-  - create namespaces: ${TOKENVISOR_NAMESPACE}, ${SKYPILOT_NAMESPACE}
+  - create namespaces: ${TOKENVISOR_NAMESPACE}, ${SKYPILOT_NAMESPACE}, ${LLMD_NAMESPACE}
   - apply Gateway API CRDs
+  - apply Gateway API Inference Extension CRDs ${GAIE_VERSION}
   - create GatewayClass/cilium only when Cilium pods are detected and the class is missing
   - apply ServiceMonitor and PodMonitor CRDs
   - write operator values under .local/
@@ -923,8 +940,10 @@ run_platform() {
   info "Creating required namespaces"
   apply_namespace "${TOKENVISOR_NAMESPACE}"
   apply_namespace "${SKYPILOT_NAMESPACE}"
+  apply_namespace "${LLMD_NAMESPACE}"
 
   apply_gateway_api_crds
+  apply_inference_extension_crds
   ensure_cilium_gateway_class
   apply_monitoring_crds
   write_platform_values
@@ -1006,6 +1025,37 @@ metadata:
 spec:
   storageClassName: ""
   volumeName: seaweedfs-skypilot-pv
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: ${size}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: seaweedfs-llm-d-pv
+spec:
+  accessModes: [ReadWriteMany]
+  capacity:
+    storage: ${size}
+  csi:
+    driver: seaweedfs-csi-driver
+    volumeHandle: seaweedfs-llm-d-pv-id
+    volumeAttributes:
+      collection: default
+      path: $(yaml_quote "${model_path}")
+      concurrentReaders: "128"
+  persistentVolumeReclaimPolicy: Retain
+  volumeMode: Filesystem
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-model-storage-pvc
+  namespace: ${LLMD_NAMESPACE}
+spec:
+  storageClassName: ""
+  volumeName: seaweedfs-llm-d-pv
   accessModes: [ReadWriteMany]
   resources:
     requests:
@@ -1147,6 +1197,7 @@ run_storage_model_pvcs() {
   confirm_apply "storage model PV/PVC manifests" "${assume_yes}"
   apply_namespace "${TOKENVISOR_NAMESPACE}"
   apply_namespace "${SKYPILOT_NAMESPACE}"
+  apply_namespace "${LLMD_NAMESPACE}"
   kubectl apply -f "${output}"
 }
 

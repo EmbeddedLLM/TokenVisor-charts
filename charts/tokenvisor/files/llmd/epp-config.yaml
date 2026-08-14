@@ -1,0 +1,54 @@
+# apiVersion pinned to the EPP image.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+
+plugins:
+  - name: queue-scorer
+    type: queue-scorer
+  - name: kv-cache-utilization-scorer
+    type: kv-cache-utilization-scorer
+  - name: prefix-cache-scorer
+    type: prefix-cache-scorer
+  - name: metrics-data-source
+    type: metrics-data-source
+  # Maps vLLM's Prometheus metric names onto the scorer inputs. Declaring an
+  # engine entry blocks the built-in defaults for that engine, so every spec has
+  # to be restated -- including the ones that match the default.
+  - name: core-metrics-extractor
+    type: core-metrics-extractor
+    parameters:
+      defaultEngine: vllm
+      engineConfigs:
+        - name: vllm
+          queuedRequestsSpec: "vllm:num_requests_waiting"
+          runningRequestsSpec: "vllm:num_requests_running"
+          kvUsageSpec: "vllm:kv_cache_usage_perc"
+          # Empty on purpose. vLLM only emits a sample for
+          # `vllm:lora_requests_info` once LoRA adapters see traffic, so
+          # requiring it would leave every endpoint perpetually un-ready. The
+          # scorers below do not use LoRA affinity.
+          loraSpec: ""
+          cacheInfoSpec: "vllm:cache_config_info"
+  - name: single-profile-handler
+    type: single-profile-handler
+  - name: max-score-picker
+    type: max-score-picker
+
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: queue-scorer
+        weight: 2
+      - pluginRef: kv-cache-utilization-scorer
+        weight: 2
+      - pluginRef: prefix-cache-scorer
+        weight: 3
+      - pluginRef: max-score-picker
+
+# Required whenever the data layer is enabled: without it the metrics source is
+# never joined to the extractor and every endpoint scores as unknown.
+dataLayer:
+  sources:
+    - pluginRef: metrics-data-source
+      extractors:
+        - pluginRef: core-metrics-extractor

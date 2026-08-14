@@ -53,3 +53,25 @@ spec:
     volumeAttributes:
       server: nfs-server.nfs-server.svc.cluster.local
       share: /
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-pv-static-llm-d
+spec:
+  capacity:
+    storage: 1Ti # This is just a label for K8s, NFS doesn't enforce it
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-csi
+  mountOptions:
+    - nconnect=8
+    - vers=4.1
+    - noatime
+  csi:
+    driver: nfs.csi.k8s.io
+    volumeHandle: nfs-volume-handle-llm-d
+    volumeAttributes:
+      server: nfs-server.nfs-server.svc.cluster.local
+      share: /

@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: seaweedfs-llm-d-pv
+spec:
+  accessModes:
+    - ReadWriteMany
+  capacity:
+    storage: 20Gi
+  csi:
+    driver: seaweedfs-csi-driver
+    volumeHandle: seaweedfs-llm-d-pv-id
+    volumeAttributes:
+      collection: default
+      replication: "000"
+      # Same path as the tokenvisor and skypilot volumes, so a model pulled by
+      # one namespace is not re-downloaded by another.
+      path: /shared_hf_repo
+  persistentVolumeReclaimPolicy: Retain
+  volumeMode: Filesystem
+  mountOptions:
+    - "dirAutoCreate=true"
+    # this is to make the directory rwx for anyone
+    - "umask=000"

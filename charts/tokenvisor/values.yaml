@@ -55,6 +55,11 @@ emu:
     EMU_ENABLE_BYOK: "true"
     EMU_PUBLIC_PROFILES: "https://embeddedllm.github.io/TokenVisor-recipes/profiles/latest.json"
     SKYPILOT_API_SERVER_ENDPOINT: "http://skypilot-api-service.skypilot.svc.cluster.local"
+    EMU_LLMD_NAMESPACE: "llm-d"
+    EMU_LLMD_EPP_CONFIG_MAP: "llm-d-epp-config"
+    EMU_LLMD_ENVOY_CONFIG_MAP: "llm-d-envoy-config"
+    EMU_LLMD_EPP_IMAGE: "ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.9.0"
+    EMU_LLMD_ENVOY_IMAGE: "docker.io/envoyproxy/envoy:distroless-v1.33.2"
     EMU_PRESIDIO_ANALYZER_URL: "http://presidio-analyzer.tokenvisor.svc.cluster.local:3000"
     EMU_PRESIDIO_ANONYMIZER_URL: "http://presidio-anonymizer.tokenvisor.svc.cluster.local:3000"
     SERVICE_NAME: "emu"
@@ -404,6 +409,23 @@ storage:
     accessModes:
       - ReadWriteMany
     size: 20Gi
+
+llmd:
+  namespace: llm-d
+  createNamespace: true
+  # NOTE: emu backend currently expects this ServiceAccount name (do not change unless code is updated)
+  serviceAccount: llm-d-epp
+  eppConfigMap: llm-d-epp-config
+  envoyConfigMap: llm-d-envoy-config
+  modelPvc:
+    create: false
+    # NOTE: emu backend currently expects this PVC name (do not change unless code is updated)
+    name: nfs-model-storage-pvc
+    storageClassName: ""
+    volumeName: ""
+    accessModes:
+      - ReadWriteMany
+    size: 1Ti
 
 clickhouse:
   enabled: true

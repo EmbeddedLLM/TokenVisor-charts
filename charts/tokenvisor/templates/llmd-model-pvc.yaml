@@ -1,0 +1,21 @@
+{{- if .Values.llmd.modelPvc.create }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.llmd.modelPvc.name }}
+  namespace: {{ .Values.llmd.namespace }}
+  labels:
+    {{- include "tokenvisor.labels" . | nindent 4 }}
+spec:
+  accessModes:
+{{- toYaml .Values.llmd.modelPvc.accessModes | nindent 4 }}
+{{- if .Values.llmd.modelPvc.storageClassName }}
+  storageClassName: {{ .Values.llmd.modelPvc.storageClassName }}
+{{- end }}
+{{- if .Values.llmd.modelPvc.volumeName }}
+  volumeName: {{ .Values.llmd.modelPvc.volumeName }}
+{{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.llmd.modelPvc.size }}
+{{- end }}

@@ -92,6 +92,13 @@ helm install clickhouse-operator clickhouse-operator/altinity-clickhouse-operato
 kubectl apply -f clickhouse-cluster-deploy.yaml -n tokenvisor
 kubectl apply -f clickhouse-init-db.yaml -n tokenvisor
 
+### Setup llm-d ###
+kubectl create namespace llm-d
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.5.0/v1-manifests.yaml
+kubectl apply -f llm-d-service-account.yaml -n llm-d
+kubectl apply -f llm-d-epp-config.yaml -n llm-d
+kubectl apply -f llm-d-envoy-config.yaml -n llm-d
+
 ### INSTALL Skypilot API Server ###
 kubectl create ns skypilot
 kubectl apply -f skypilot-repo-secret.yaml -n skypilot

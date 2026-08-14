@@ -1,0 +1,80 @@
+{{- if .Values.llmd.createNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.llmd.namespace }}
+  labels:
+    {{- include "tokenvisor.labels" . | nindent 4 }}
+---
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.llmd.serviceAccount }}
+  namespace: {{ .Values.llmd.namespace }}
+  labels:
+    {{- include "tokenvisor.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.llmd.serviceAccount }}-pod-reader
+  namespace: {{ .Values.llmd.namespace }}
+  labels:
+    {{- include "tokenvisor.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.llmd.serviceAccount }}-pod-reader
+  namespace: {{ .Values.llmd.namespace }}
+  labels:
+    {{- include "tokenvisor.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.llmd.serviceAccount }}
+    namespace: {{ .Values.llmd.namespace }}
+roleRef:
+  kind: Role
+  name: {{ .Values.llmd.serviceAccount }}-pod-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.llmd.serviceAccount }}-inference-reader
+  namespace: {{ .Values.llmd.namespace }}
+  labels:
+    {{- include "tokenvisor.labels" . | nindent 4 }}
+rules:
+  # `llm-d.ai` is where the EPP's own CRDs moved at v0.9.0; the two
+  # `inference.networking.*` groups are the Gateway API Inference Extension's.
+  - apiGroups:
+      - inference.networking.k8s.io
+      - inference.networking.x-k8s.io
+      - llm-d.ai
+    resources:
+      - inferencepools
+      - inferenceobjectives
+      - inferencemodelrewrites
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.llmd.serviceAccount }}-inference-reader
+  namespace: {{ .Values.llmd.namespace }}
+  labels:
+    {{- include "tokenvisor.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.llmd.serviceAccount }}
+    namespace: {{ .Values.llmd.namespace }}
+roleRef:
+  kind: Role
+  name: {{ .Values.llmd.serviceAccount }}-inference-reader
+  apiGroup: rbac.authorization.k8s.io

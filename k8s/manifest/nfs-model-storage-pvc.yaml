@@ -26,3 +26,17 @@ spec:
   resources:
     requests:
       storage: 1Ti
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-model-storage-pvc
+  namespace: llm-d
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-csi
+  volumeName: nfs-pv-static-llm-d
+  resources:
+    requests:
+      storage: 1Ti
