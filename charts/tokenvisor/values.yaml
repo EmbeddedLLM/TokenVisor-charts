@@ -261,6 +261,7 @@ studio:
     HOST: "devstudio.tokenvisor.ai"
     ORIGIN: "https://devstudio.tokenvisor.ai"
     EMU_URL: "http://emu-api-server.tokenvisor.svc.cluster.local:5969"
+    EMU_AUDIT_RECORD_MODE: "opt_out"
     STUDIO_PORT: "4969"
     NODE_ENV: "production"
     BODY_SIZE_LIMIT: "Infinity"
