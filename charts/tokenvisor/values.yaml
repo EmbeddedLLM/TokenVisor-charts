@@ -271,18 +271,37 @@ studio:
     IDLE_AUTH_TIMEOUT: "900"
     STUDIO_APP_NAME: "TokenVisor"
     STUDIO_FROM_EMAIL: "no-reply@tokenvisor.ai"
+    AUTH0_ISSUER_BASE_URL: ""
+    AUTH0_CLIENT_ID: ""
+    AUTH0_CLIENT_SECRET: ""
+    EMBEDDED_LOGOUT_URL: "" # embedded use only; pairs with embedded-in-portal below
   secret:
     create: false
     existingSecret: studio-secret
     data: {}
   authConfigYaml: |
-    # features:
-    #   user-pass-login:
-    #     login: true
-    #     signups: true
-    #   redirect-to-idp: false
-    #   organization:
-    #     no-orgs-message: "You don't belong to any organizations yet. Please contact support."
+    features:
+      user-pass-login:
+        login: true
+        signups: true
+      redirect-to-idp: false
+      embedded-in-portal: false
+      organization:
+        create: "sso"
+        join: "sso"
+        no-orgs-message: "Contact your admin."
+        update: "sso"
+        delete: "sso"
+        members:
+          read: true
+          update-role: "sso"
+          invite: "sso"
+          remove: "sso"
+        roles:
+          read: true
+          create: "sso"
+          update: "sso"
+          delete: "sso"
   themeCss: |
     :root {
       --background: 216 24% 96%;

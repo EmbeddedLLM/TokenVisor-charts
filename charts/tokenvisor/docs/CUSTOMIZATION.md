@@ -224,6 +224,32 @@ studio:
 
 If the final endpoint is known only after install, update `.local/studio-values.yaml`, repeat the `values build` command for the deployment mode, and run the normal Helm upgrade command from the [recommended install flow](../README.md#8-install-tokenvisor). Keeping the source file current prevents a later values build from restoring a stale public URL.
 
+## Studio sign-in and feature configuration
+
+`studio.authConfigYaml` decides which sign-in methods Studio offers and which organization controls it exposes. The chart ships it complete, at Studio's own defaults: password sign-in available, no redirect to an identity provider, and organization controls resolved per organization. An untouched install is a working password-login deployment, so you only need this to turn SSO on or to change what Studio offers.
+
+Override only the keys you are changing:
+
+```yaml
+studio:
+  config:
+    AUTH0_ISSUER_BASE_URL: "your-tenant.us.auth0.com" # domain only
+    AUTH0_CLIENT_ID: "<CLIENT_ID>"
+    AUTH0_CLIENT_SECRET: "<CLIENT_SECRET>"
+  authConfigYaml: |
+    features:
+      user-pass-login:
+        login: true
+        signups: false
+      redirect-to-idp: auth0
+```
+
+All three Auth0 settings, the client secret included, go in `studio.config`, which renders the `studio-config` ConfigMap.
+
+The document is validated as a whole — one invalid value discards every setting in it and reverts Studio to defaults. Check the Studio logs for `Error reading or validating config:` after a change.
+
+Every key, its default, and what `"sso"` resolves to are documented in [Single Sign-On with Auth0](https://docs.tokenvisor.ai/Guide-for-Platform-Admins/authentication-and-access/single-sign-on/) and [Connecting Your Own Portal](https://docs.tokenvisor.ai/Guide-for-Platform-Admins/authentication-and-access/sso-with-external-portal/).
+
 ## Studio theme + logos
 
 The chart ships with a default Studio theme and default logos, so branding works out of the box.
