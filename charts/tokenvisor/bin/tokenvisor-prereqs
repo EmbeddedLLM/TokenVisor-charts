@@ -17,6 +17,8 @@ SEAWEEDFS_RELEASE="${SEAWEEDFS_RELEASE:-seaweedfs}"
 SEAWEEDFS_CHART_VERSION="${SEAWEEDFS_CHART_VERSION:-4.39.0}"
 SEAWEEDFS_CSI_CHART_VERSION="${SEAWEEDFS_CSI_CHART_VERSION:-0.2.30}"
 SEAWEEDFS_S3_CONFIG_SECRET="${SEAWEEDFS_S3_CONFIG_SECRET:-${SEAWEEDFS_RELEASE}-s3-config}"
+SEAWEEDFS_SECURITY_CONFIG="${SEAWEEDFS_SECURITY_CONFIG:-${SEAWEEDFS_RELEASE}-security-config}"
+SEAWEEDFS_FILER_READ_SECRET_NAME="${SEAWEEDFS_FILER_READ_SECRET_NAME:-seaweedfs-filer-read}"
 
 usage() {
   cat <<'EOF'
@@ -27,6 +29,9 @@ Usage:
   ./bin/tokenvisor-prereqs storage local-path [--apply] [--yes]
   ./bin/tokenvisor-prereqs storage audit-s3 [--apply] [--yes]
   ./bin/tokenvisor-prereqs storage seaweedfs [--apply] [--yes]
+  ./bin/tokenvisor-prereqs storage seaweedfs-auth [--apply] [--yes]
+  ./bin/tokenvisor-prereqs storage seaweedfs-csi-auth [--apply] [--yes] [--check]
+  ./bin/tokenvisor-prereqs storage seaweedfs-read-secret [--apply] [--yes] [--namespace NAMESPACE] [--secret NAME]
   ./bin/tokenvisor-prereqs storage model-pvcs [--apply] [--yes] [--path PATH] [--size SIZE]
   ./bin/tokenvisor-prereqs values build [--mode ha|single-node] [--output PATH] VALUES_FILE...
   ./bin/tokenvisor-prereqs gpu check
@@ -49,6 +54,10 @@ Environment:
   TOKENVISOR_MODE        ha or single-node for values build and check (default: ha)
   SEAWEEDFS_NAMESPACE    Bundled SeaweedFS namespace (default: seaweedfs)
   SEAWEEDFS_RELEASE      Bundled SeaweedFS release name (default: seaweedfs)
+  SEAWEEDFS_SECURITY_CONFIG
+                         Shared security.toml ConfigMap (default: <release>-security-config)
+  SEAWEEDFS_FILER_READ_SECRET_NAME
+                         Consumer namespace Secret name (default: seaweedfs-filer-read)
   REGISTRY_SECRET_NAME   Image pull secret name (default: registry-secret)
   GHCR_USERNAME          GitHub username for secrets ghcr
   GHCR_TOKEN             GitHub token for secrets ghcr
@@ -77,6 +86,105 @@ random_hex() {
     return 0
   fi
   od -An -N24 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+random_signing_key() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32
+    return 0
+  fi
+  od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+toml_section_has_key() {
+  local file="$1"
+  local section="$2"
+  local key="$3"
+
+  awk -v section="[${section}]" -v key="${key}" '
+    $0 ~ /^[[:space:]]*\[/ {
+      current = $0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", current)
+      next
+    }
+    current == section && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" { found = 1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "${file}"
+}
+
+toml_section_value() {
+  local file="$1"
+  local section="$2"
+  local key="$3"
+
+  awk -v section="[${section}]" -v key="${key}" '
+    $0 ~ /^[[:space:]]*\[/ {
+      current = $0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", current)
+      next
+    }
+    current == section && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", value)
+      sub(/[[:space:]]*#.*/, "", value)
+      sub(/^"/, "", value)
+      sub(/"[[:space:]]*$/, "", value)
+      print value
+      exit
+    }
+  ' "${file}"
+}
+
+validate_signing_key() {
+  local name="$1"
+  local value="$2"
+
+  [ "${#value}" -ge 32 ] \
+    || {
+      echo "ERROR: existing SeaweedFS ${name} signing key is weaker than 32 characters; refusing to rotate it automatically" >&2
+      return 1
+    }
+}
+
+append_toml_section_key() {
+  local file="$1"
+  local section="$2"
+  local key="$3"
+  local value="$4"
+  local temporary
+
+  temporary="$(mktemp "${file}.XXXXXX")"
+  chmod 600 "${temporary}" || {
+    rm -f "${temporary}"
+    die "failed to protect temporary SeaweedFS security configuration"
+  }
+  if toml_section_has_key "${file}" "${section}" "${key}"; then
+    rm -f "${temporary}"
+    return 0
+  fi
+  if ! awk -v section="[${section}]" -v key="${key}" -v value="${value}" '
+    $0 == section {
+      print
+      print key " = \"" value "\""
+      inserted = 1
+      next
+    }
+    { print }
+    END {
+      if (!inserted) {
+        if (NR > 0) print ""
+        print section
+        print key " = \"" value "\""
+      }
+    }
+  ' "${file}" > "${temporary}"; then
+    rm -f "${temporary}"
+    die "failed to update the SeaweedFS security ConfigMap content"
+  fi
+  if ! mv "${temporary}" "${file}"; then
+    rm -f "${temporary}"
+    die "failed to stage the SeaweedFS security ConfigMap content"
+  fi
 }
 
 yaml_quote() {
@@ -1063,7 +1171,7 @@ spec:
 YAML
 
   info "Wrote ${output}"
-  warn "For SeaweedFS CSI static PVs, ${size} is Kubernetes binding metadata, not a hard storage quota."
+  warn "SeaweedFS CSI applies ${size} as each mount's capacity ceiling. Mounts using the same collection share its usage, but may have different ceilings."
 }
 
 run_storage_check() {
@@ -1499,6 +1607,10 @@ global:
   seaweedfs:
     monitoring:
       enabled: true
+    securityConfig:
+      jwtSigning:
+        filerWrite: true
+        filerRead: true
     enableReplication: true
     replicationPlacement: "${replication_placement}"
 
@@ -1589,8 +1701,13 @@ render_seaweedfs_csi_values() {
   cat > "${output}" <<YAML
 # Generated by ./bin/tokenvisor-prereqs storage seaweedfs or bundled audit-s3.
 seaweedfsFiler: "${SEAWEEDFS_RELEASE}-filer.${SEAWEEDFS_NAMESPACE}.svc.cluster.local:8888"
+security:
+  enabled: true
+  existingConfigMap: "${SEAWEEDFS_SECURITY_CONFIG}"
 mountService:
   enabled: true
+  updateStrategy:
+    type: OnDelete
 node:
   updateStrategy:
     type: OnDelete
@@ -1600,6 +1717,129 @@ YAML
 
 seaweedfs_prereq_marker_name() {
   printf '%s' "${SEAWEEDFS_RELEASE}-tokenvisor-prereq"
+}
+
+ensure_seaweedfs_security_config() {
+  local configmap_file read_key write_key
+
+  require_tool kubectl
+  configmap_file="$(mktemp)"
+  chmod 600 "${configmap_file}" || {
+    rm -f "${configmap_file}"
+    die "failed to protect temporary SeaweedFS security configuration"
+  }
+
+  if kubectl_ok -n "${SEAWEEDFS_NAMESPACE}" get configmap "${SEAWEEDFS_SECURITY_CONFIG}"; then
+    kubectl -n "${SEAWEEDFS_NAMESPACE}" get configmap "${SEAWEEDFS_SECURITY_CONFIG}" \
+      -o 'jsonpath={.data.security\.toml}' > "${configmap_file}" || {
+        rm -f "${configmap_file}"
+        die "failed to read the existing SeaweedFS security ConfigMap"
+      }
+  fi
+
+  read_key="$(toml_section_value "${configmap_file}" "jwt.filer_signing.read" key || true)"
+  write_key="$(toml_section_value "${configmap_file}" "jwt.filer_signing" key || true)"
+  if [ -z "${read_key}" ]; then
+    read_key="$(random_signing_key)"
+    append_toml_section_key "${configmap_file}" "jwt.filer_signing.read" key "${read_key}"
+  else
+    validate_signing_key "Filer read" "${read_key}" || {
+      rm -f "${configmap_file}"
+      die "existing SeaweedFS Filer read signing key is weaker than 32 characters; refusing to rotate it automatically"
+    }
+  fi
+  if [ -z "${write_key}" ]; then
+    write_key="$(random_signing_key)"
+    while [ "${write_key}" = "${read_key}" ]; do
+      write_key="$(random_signing_key)"
+    done
+    append_toml_section_key "${configmap_file}" "jwt.filer_signing" key "${write_key}"
+  else
+    validate_signing_key "Filer write" "${write_key}" || {
+      rm -f "${configmap_file}"
+      die "existing SeaweedFS Filer write signing key is weaker than 32 characters; refusing to rotate it automatically"
+    }
+  fi
+  [ "${read_key}" != "${write_key}" ] \
+    || {
+      rm -f "${configmap_file}"
+      die "SeaweedFS Filer read and write signing keys are identical; rotate them manually before enabling authentication"
+    }
+
+  kubectl -n "${SEAWEEDFS_NAMESPACE}" create configmap "${SEAWEEDFS_SECURITY_CONFIG}" \
+    --from-file=security.toml="${configmap_file}" \
+    --dry-run=client -o yaml \
+    | kubectl apply -f - >/dev/null || {
+      rm -f "${configmap_file}"
+      die "failed to apply the SeaweedFS security ConfigMap"
+    }
+  kubectl -n "${SEAWEEDFS_NAMESPACE}" label configmap "${SEAWEEDFS_SECURITY_CONFIG}" \
+    app.kubernetes.io/managed-by=Helm \
+    app.kubernetes.io/name=seaweedfs \
+    app.kubernetes.io/instance="${SEAWEEDFS_RELEASE}" \
+    --overwrite >/dev/null || {
+      rm -f "${configmap_file}"
+      die "failed to set Helm ownership labels on the SeaweedFS security ConfigMap"
+    }
+  kubectl -n "${SEAWEEDFS_NAMESPACE}" annotate configmap "${SEAWEEDFS_SECURITY_CONFIG}" \
+    meta.helm.sh/release-name="${SEAWEEDFS_RELEASE}" \
+    meta.helm.sh/release-namespace="${SEAWEEDFS_NAMESPACE}" \
+    --overwrite >/dev/null || {
+      rm -f "${configmap_file}"
+      die "failed to set Helm ownership annotations on the SeaweedFS security ConfigMap"
+    }
+
+  rm -f "${configmap_file}"
+}
+
+seaweedfs_security_config_checksum() {
+  local configmap_file checksum read_key write_key
+
+  require_tool sha256sum
+  configmap_file="$(mktemp)"
+  chmod 600 "${configmap_file}" || {
+    rm -f "${configmap_file}"
+    die "failed to protect temporary SeaweedFS security configuration"
+  }
+  kubectl -n "${SEAWEEDFS_NAMESPACE}" get configmap "${SEAWEEDFS_SECURITY_CONFIG}" \
+    -o 'jsonpath={.data.security\.toml}' > "${configmap_file}" || {
+      rm -f "${configmap_file}"
+      die "failed to read the SeaweedFS security ConfigMap for its checksum"
+    }
+  read_key="$(toml_section_value "${configmap_file}" "jwt.filer_signing.read" key || true)"
+  write_key="$(toml_section_value "${configmap_file}" "jwt.filer_signing" key || true)"
+  [ -n "${read_key}" ] && [ -n "${write_key}" ] || {
+    rm -f "${configmap_file}"
+    die "SeaweedFS security ConfigMap is missing a Filer signing key"
+  }
+  checksum="$(printf 'read=%s\nwrite=%s\n' "${read_key}" "${write_key}" | sha256sum | awk '{print $1}')"
+  rm -f "${configmap_file}"
+  printf '%s' "${checksum}"
+}
+
+seaweedfs_filer_pod_checksum() {
+  kubectl -n "${SEAWEEDFS_NAMESPACE}" get statefulset \
+    -l "app.kubernetes.io/instance=${SEAWEEDFS_RELEASE},app.kubernetes.io/component=filer" \
+    -o "jsonpath={.items[0].spec.template.metadata.annotations['tokenvisor-security-checksum']}" \
+    2>/dev/null || true
+}
+
+read_seaweedfs_filer_read_key() {
+  local configmap_file
+
+  configmap_file="$(mktemp)"
+  chmod 600 "${configmap_file}" || {
+    rm -f "${configmap_file}"
+    die "failed to protect temporary SeaweedFS security configuration"
+  }
+  kubectl -n "${SEAWEEDFS_NAMESPACE}" get configmap "${SEAWEEDFS_SECURITY_CONFIG}" \
+    -o 'jsonpath={.data.security\.toml}' > "${configmap_file}" \
+    || {
+      rm -f "${configmap_file}"
+      die "SeaweedFS security ConfigMap ${SEAWEEDFS_NAMESPACE}/${SEAWEEDFS_SECURITY_CONFIG} was not found"
+    }
+  toml_section_value "${configmap_file}" "jwt.filer_signing.read" key
+  rm -f "${configmap_file}"
 }
 
 ensure_seaweedfs_storage_class() {
@@ -1695,6 +1935,8 @@ apply_bundled_seaweedfs() {
   local values_file="${LOCAL_DIR}/seaweedfs-values.yaml"
   local marker_name metadata_storage_class volume_mode volume_nodes volume_paths
   local volume_server_count volume_storage_class
+  local existing_seaweedfs_release=0 csi_release_exists=0 csi_release_ready=0 csi_security_configured=0
+  local security_checksum
   local -a volume_storage_classes
 
   require_tool kubectl
@@ -1762,6 +2004,20 @@ apply_bundled_seaweedfs() {
     && ! kubectl_ok -n "${SEAWEEDFS_NAMESPACE}" get configmap "${marker_name}"; then
     die "SeaweedFS release ${SEAWEEDFS_RELEASE}/${SEAWEEDFS_NAMESPACE} already exists but is not helper-managed; review and reconcile it manually"
   fi
+  if helm_release_exists "${SEAWEEDFS_RELEASE}" "${SEAWEEDFS_NAMESPACE}"; then
+    existing_seaweedfs_release=1
+  fi
+  if helm_release_exists seaweedfs-csi-driver "${SEAWEEDFS_NAMESPACE}"; then
+    csi_release_exists=1
+    if csi_security_values_enabled 2>/dev/null | grep -qx true \
+      && [ "$(csi_security_values_source 2>/dev/null || true)" = "${SEAWEEDFS_SECURITY_CONFIG}" ]; then
+      csi_security_configured=1
+    fi
+    if helm status seaweedfs-csi-driver -n "${SEAWEEDFS_NAMESPACE}" -o json \
+      | yq eval -r '.info.status // ""' - 2>/dev/null | grep -qx deployed; then
+      csi_release_ready=1
+    fi
+  fi
   if helm_release_exists seaweedfs-csi-driver "${SEAWEEDFS_NAMESPACE}" \
     && ! kubectl_ok -n "${SEAWEEDFS_NAMESPACE}" get configmap "${marker_name}"; then
     die "SeaweedFS CSI release already exists but is not helper-managed; review and reconcile it manually"
@@ -1771,6 +2027,8 @@ apply_bundled_seaweedfs() {
   kubectl -n "${SEAWEEDFS_NAMESPACE}" create configmap "${marker_name}" \
     --from-literal=managed-by=tokenvisor-prereqs \
     --dry-run=client -o yaml | kubectl apply -f -
+  ensure_seaweedfs_security_config
+  security_checksum="$(seaweedfs_security_config_checksum)"
   if [ "${enable_s3}" -eq 1 ]; then
     kubectl apply -f "${LOCAL_DIR}/seaweedfs-s3-config-secret.yaml"
   fi
@@ -1787,13 +2045,383 @@ apply_bundled_seaweedfs() {
     --version "${SEAWEEDFS_CHART_VERSION}" \
     --timeout 15m \
     --wait \
+    --set-string "filer.podAnnotations.tokenvisor-security-checksum=${security_checksum}" \
     -f "${LOCAL_DIR}/seaweedfs-values.yaml"
-  helm upgrade --install seaweedfs-csi-driver seaweedfs-csi-driver/seaweedfs-csi-driver \
+  if [ "${existing_seaweedfs_release}" -eq 0 ] \
+    || [ "${csi_release_exists}" -eq 0 ] \
+    || { [ "${csi_security_configured}" -eq 1 ] && [ "${csi_release_ready}" -eq 0 ]; }; then
+    helm upgrade --install seaweedfs-csi-driver seaweedfs-csi-driver/seaweedfs-csi-driver \
+      --namespace "${SEAWEEDFS_NAMESPACE}" \
+      --version "${SEAWEEDFS_CSI_CHART_VERSION}" \
+      --timeout 15m \
+      --wait \
+      -f "${LOCAL_DIR}/seaweedfs-csi-values.yaml"
+  else
+    warn "Existing helper-managed CSI release was left unchanged; use storage seaweedfs-csi-auth for its controlled JWT configuration update."
+  fi
+}
+
+helm_release_chart_version() {
+  local release="$1"
+  local namespace="$2"
+  local prefix="$3"
+  local chart
+
+  require_tool helm
+  chart="$(helm list -n "${namespace}" --filter "^${release}$" -o json \
+    | yq eval -r '.[0].chart.metadata.version // .[0].chart // ""' -)"
+  if [[ "${chart}" == "${prefix}-"* ]]; then
+    chart="$(printf '%s' "${chart}" | sed "s/^${prefix}-//")"
+  fi
+  printf '%s' "${chart}" | grep -Eq '^[0-9]+(\.[0-9]+){2}([-+].*)?$' \
+    || die "could not determine a valid installed ${release} chart version from Helm list"
+  printf '%s' "${chart}"
+}
+
+seaweedfs_chart_version() {
+  helm_release_chart_version "${SEAWEEDFS_RELEASE}" "${SEAWEEDFS_NAMESPACE}" seaweedfs
+}
+
+seaweedfs_auth_configured() {
+  local configmap_file result read_key write_key
+
+  configmap_file="$(mktemp)"
+  chmod 600 "${configmap_file}"
+  kubectl -n "${SEAWEEDFS_NAMESPACE}" get configmap "${SEAWEEDFS_SECURITY_CONFIG}" \
+    -o 'jsonpath={.data.security\.toml}' > "${configmap_file}" 2>/dev/null || {
+    rm -f "${configmap_file}"
+    return 1
+  }
+  read_key="$(toml_section_value "${configmap_file}" "jwt.filer_signing.read" key || true)"
+  write_key="$(toml_section_value "${configmap_file}" "jwt.filer_signing" key || true)"
+  [ "${#read_key}" -ge 32 ] && [ "${#write_key}" -ge 32 ] \
+    && [ "${read_key}" != "${write_key}" ]
+  result=$?
+  rm -f "${configmap_file}"
+  return "${result}"
+}
+
+seaweedfs_auth_values_enabled() {
+  helm get values "${SEAWEEDFS_RELEASE}" -n "${SEAWEEDFS_NAMESPACE}" -a -o yaml \
+    | yq eval -r '
+      (.global.seaweedfs.securityConfig.jwtSigning.filerRead == true)
+      and (.global.seaweedfs.securityConfig.jwtSigning.filerWrite == true)' -
+}
+
+verify_seaweedfs_auth_runtime() {
+  local security_checksum filer_pod_checksum
+
+  seaweedfs_auth_values_enabled | grep -qx true \
+    || die "SeaweedFS Helm values do not enable both Filer JWT modes"
+  seaweedfs_auth_configured \
+    || die "SeaweedFS security ConfigMap does not contain both Filer JWT keys"
+  security_checksum="$(seaweedfs_security_config_checksum)"
+  filer_pod_checksum="$(seaweedfs_filer_pod_checksum)"
+  [ -n "${filer_pod_checksum}" ] && [ "${filer_pod_checksum}" = "${security_checksum}" ] \
+    || die "SeaweedFS Filer pods do not reference the current security ConfigMap; run storage seaweedfs-auth --apply"
+  kubectl -n "${SEAWEEDFS_NAMESPACE}" wait \
+    --for=condition=ready pod \
+    -l "app.kubernetes.io/instance=${SEAWEEDFS_RELEASE},app.kubernetes.io/component=filer" \
+    --timeout=120s >/dev/null \
+    || die "SeaweedFS Filer pods are not Ready after the authentication upgrade"
+}
+
+require_helper_managed_seaweedfs() {
+  helm_release_exists "${SEAWEEDFS_RELEASE}" "${SEAWEEDFS_NAMESPACE}" \
+    || die "SeaweedFS release ${SEAWEEDFS_RELEASE}/${SEAWEEDFS_NAMESPACE} was not found"
+  kubectl_ok -n "${SEAWEEDFS_NAMESPACE}" get configmap "$(seaweedfs_prereq_marker_name)" \
+    || die "SeaweedFS exists but is not managed by tokenvisor-prereqs; refusing to change it"
+}
+
+run_storage_seaweedfs_auth() {
+  local apply=0
+  local assume_yes=0
+  local chart_version security_checksum filer_pod_checksum
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply) apply=1 ;;
+      --yes|-y) assume_yes=1 ;;
+      --dry-run) apply=0 ;;
+      *) die "unknown storage seaweedfs-auth option: $1" ;;
+    esac
+    shift
+  done
+
+  require_tool kubectl
+  require_tool helm
+  require_yq_v4 "SeaweedFS authentication migration"
+  require_helper_managed_seaweedfs
+  chart_version="$(seaweedfs_chart_version)"
+
+  if seaweedfs_auth_values_enabled 2>/dev/null | grep -qx true \
+    && seaweedfs_auth_configured; then
+    security_checksum="$(seaweedfs_security_config_checksum)"
+    filer_pod_checksum="$(seaweedfs_filer_pod_checksum)"
+    if [ -n "${filer_pod_checksum}" ] && [ "${filer_pod_checksum}" = "${security_checksum}" ]; then
+      verify_seaweedfs_auth_runtime
+      info "SeaweedFS Filer authentication is already enabled with strong distinct keys; no changes are needed."
+      return 0
+    fi
+  fi
+
+  if [ "${apply}" -ne 1 ]; then
+    cat <<EOF
+SeaweedFS Filer authentication will be enabled for ${SEAWEEDFS_RELEASE}/${SEAWEEDFS_NAMESPACE}.
+The installed chart version (${chart_version}) and all existing Helm values are preserved.
+The shared security ConfigMap will preserve existing keys and add only missing, distinct
+32-byte read/write keys. CSI is not upgraded or restarted.
+Run with --apply to execute.
+EOF
+    return 0
+  fi
+
+  confirm_apply "SeaweedFS Filer authentication" "${assume_yes}"
+  helm repo add seaweedfs https://seaweedfs.github.io/seaweedfs/helm --force-update >/dev/null
+  helm repo update seaweedfs >/dev/null
+  ensure_seaweedfs_security_config
+  security_checksum="$(seaweedfs_security_config_checksum)"
+  helm upgrade "${SEAWEEDFS_RELEASE}" seaweedfs/seaweedfs \
     --namespace "${SEAWEEDFS_NAMESPACE}" \
-    --version "${SEAWEEDFS_CSI_CHART_VERSION}" \
+    --version "${chart_version}" \
+    --reuse-values \
+    --set global.seaweedfs.securityConfig.jwtSigning.filerRead=true \
+    --set global.seaweedfs.securityConfig.jwtSigning.filerWrite=true \
+    --set-string "filer.podAnnotations.tokenvisor-security-checksum=${security_checksum}" \
     --timeout 15m \
-    --wait \
-    -f "${LOCAL_DIR}/seaweedfs-csi-values.yaml"
+    --wait
+  verify_seaweedfs_auth_runtime
+  info "SeaweedFS Filer read/write authentication is enabled. CSI was left untouched; existing mounts use normal copy fallback until the optional CSI migration."
+}
+
+csi_security_values_enabled() {
+  helm get values seaweedfs-csi-driver -n "${SEAWEEDFS_NAMESPACE}" -a -o yaml \
+    | yq eval -r '.security.enabled // false' -
+}
+
+csi_security_values_source() {
+  helm get values seaweedfs-csi-driver -n "${SEAWEEDFS_NAMESPACE}" -a -o yaml \
+    | yq eval -r '.security.existingConfigMap // ""' -
+}
+
+csi_daemonset_ready() {
+  local daemonset="$1"
+  local desired updated ready
+
+  desired="$(kubectl -n "${SEAWEEDFS_NAMESPACE}" get daemonset "${daemonset}" -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || true)"
+  updated="$(kubectl -n "${SEAWEEDFS_NAMESPACE}" get daemonset "${daemonset}" -o jsonpath='{.status.updatedNumberScheduled}' 2>/dev/null || true)"
+  ready="$(kubectl -n "${SEAWEEDFS_NAMESPACE}" get daemonset "${daemonset}" -o jsonpath='{.status.numberReady}' 2>/dev/null || true)"
+  [ -n "${desired}" ] && [ "${desired}" -gt 0 ] \
+    && [ "${updated:-0}" -eq "${desired}" ] \
+    && [ "${ready:-0}" -eq "${desired}" ]
+}
+
+csi_rollout_state() {
+  local enabled configmap controller_available controller_replicas
+
+  enabled="$(csi_security_values_enabled 2>/dev/null || echo false)"
+  configmap="$(csi_security_values_source 2>/dev/null || true)"
+  if [ "${enabled}" != "true" ] || [ "${configmap}" != "${SEAWEEDFS_SECURITY_CONFIG}" ]; then
+    printf '%s' "not configured"
+    return 0
+  fi
+
+  controller_available="$(kubectl -n "${SEAWEEDFS_NAMESPACE}" get deployment seaweedfs-csi-driver-controller \
+    -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)"
+  controller_replicas="$(kubectl -n "${SEAWEEDFS_NAMESPACE}" get deployment seaweedfs-csi-driver-controller \
+    -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  if [ "${controller_replicas:-0}" -gt 0 ] \
+    && [ "${controller_available:-0}" -eq "${controller_replicas}" ] \
+    && csi_daemonset_ready seaweedfs-csi-driver-node \
+    && csi_daemonset_ready seaweedfs-csi-driver-mount; then
+    printf '%s' "fully configured"
+  elif kubectl -n "${SEAWEEDFS_NAMESPACE}" get daemonset seaweedfs-csi-driver-node \
+    -o jsonpath='{.status.updatedNumberScheduled}' 2>/dev/null | grep -q '[1-9]' \
+    || kubectl -n "${SEAWEEDFS_NAMESPACE}" get daemonset seaweedfs-csi-driver-mount \
+      -o jsonpath='{.status.updatedNumberScheduled}' 2>/dev/null | grep -q '[1-9]'; then
+    printf '%s' "partially rolled out"
+  else
+    printf '%s' "chart updated, rollout pending"
+  fi
+}
+
+list_seaweedfs_consumers() {
+  local consumer_file pvc_rows namespace claim volume_name driver
+
+  require_yq_v4 "SeaweedFS CSI consumer discovery"
+  consumer_file="$(mktemp)"
+  chmod 600 "${consumer_file}"
+  pvc_rows="$(mktemp)"
+  chmod 600 "${pvc_rows}"
+  kubectl get pvc -A -o json \
+    | yq eval -r '.items[] | select(.spec.volumeName != null) | [.metadata.namespace, .metadata.name, .spec.volumeName] | @tsv' - \
+    > "${pvc_rows}"
+  while IFS=$'\t' read -r namespace claim volume_name; do
+    [ -n "${volume_name}" ] || continue
+    driver="$(kubectl get pv "${volume_name}" -o jsonpath='{.spec.csi.driver}' 2>/dev/null || true)"
+    [ "${driver}" = "seaweedfs-csi-driver" ] || continue
+    SEAWEEDFS_CONSUMER_NAMESPACE="${namespace}" SEAWEEDFS_CONSUMER_CLAIM="${claim}" \
+      yq eval -r \
+        '.items[]
+         | select(.metadata.namespace == strenv(SEAWEEDFS_CONSUMER_NAMESPACE))
+         | select([.spec.volumes[]? | select(.persistentVolumeClaim.claimName == strenv(SEAWEEDFS_CONSUMER_CLAIM))] | length > 0)
+         | [.spec.nodeName // "<unscheduled>", .metadata.namespace, .metadata.name, strenv(SEAWEEDFS_CONSUMER_CLAIM)]
+         | @tsv' < <(kubectl get pods -A -o json) \
+      >> "${consumer_file}"
+  done < "${pvc_rows}"
+  sort -u "${consumer_file}"
+  rm -f "${consumer_file}" "${pvc_rows}"
+}
+
+print_csi_rollout_guidance() {
+  local consumer_file node namespace pod claim
+
+  consumer_file="$(mktemp)"
+  chmod 600 "${consumer_file}"
+  list_seaweedfs_consumers > "${consumer_file}"
+  printf '\nCSI migration status: %s\n' "$(csi_rollout_state)"
+  if [ -s "${consumer_file}" ]; then
+    printf 'SeaweedFS PVC consumers (node, namespace, pod, PVC):\n'
+    while IFS=$'\t' read -r node namespace pod claim; do
+      printf '  %s\t%s\t%s\t%s\n' "${node}" "${namespace}" "${pod}" "${claim}"
+    done < "${consumer_file}"
+  else
+    printf 'No running or scheduled SeaweedFS PVC consumers were found.\n'
+  fi
+  cat <<EOF
+
+The CSI chart now references ${SEAWEEDFS_NAMESPACE}/${SEAWEEDFS_SECURITY_CONFIG}, but the
+node and mount DaemonSets use updateStrategy OnDelete. They were intentionally not restarted.
+Do not evict workloads or delete CSI pods automatically. For each node, complete this
+maintenance sequence before deleting its CSI pods:
+  kubectl cordon <node>
+  Evict/delete the listed workload pods and wait for their termination.
+  kubectl -n ${SEAWEEDFS_NAMESPACE} delete pod -l app=seaweedfs-csi-driver-mount --field-selector spec.nodeName=<node>
+  Wait for the replacement mount pod to become Ready.
+  kubectl -n ${SEAWEEDFS_NAMESPACE} delete pod -l app=seaweedfs-csi-driver-node --field-selector spec.nodeName=<node>
+  Wait for the replacement node pod to become Ready.
+  kubectl uncordon <node>
+Repeat for every node, then rerun:
+  ./bin/tokenvisor-prereqs storage seaweedfs-csi-auth --check
+
+The controller Deployment may remain Pending on a single-node cluster because its required
+anti-affinity prevents old and new replicas coexisting. After the node is uncordoned, confirm
+that the old controller is healthy and the new one is Pending, delete only the old pod by its
+exact name, then run:
+  kubectl -n ${SEAWEEDFS_NAMESPACE} rollout status deployment/seaweedfs-csi-driver-controller --timeout=15m
+Do not use a label selector for that deletion because it could select both controller pods.
+This helper never deletes a controller pod automatically.
+EOF
+  rm -f "${consumer_file}"
+}
+
+run_storage_seaweedfs_csi_auth() {
+  local apply=0
+  local assume_yes=0
+  local check=0
+  local chart_version
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply) apply=1 ;;
+      --yes|-y) assume_yes=1 ;;
+      --check) check=1 ;;
+      --dry-run) apply=0 ;;
+      *) die "unknown storage seaweedfs-csi-auth option: $1" ;;
+    esac
+    shift
+  done
+
+  require_tool kubectl
+  require_tool helm
+  require_yq_v4 "SeaweedFS CSI authentication migration"
+  require_helper_managed_seaweedfs
+  helm_release_exists seaweedfs-csi-driver "${SEAWEEDFS_NAMESPACE}" \
+    || die "SeaweedFS CSI release was not found in ${SEAWEEDFS_NAMESPACE}"
+  verify_seaweedfs_auth_runtime
+  chart_version="$(helm_release_chart_version seaweedfs-csi-driver "${SEAWEEDFS_NAMESPACE}" seaweedfs-csi-driver)"
+
+  if [ "${check}" -eq 1 ] || [ "${apply}" -ne 1 ]; then
+    print_csi_rollout_guidance
+    return 0
+  fi
+
+  confirm_apply "SeaweedFS CSI authentication configuration" "${assume_yes}"
+  helm repo add seaweedfs-csi-driver https://seaweedfs.github.io/seaweedfs-csi-driver/helm --force-update >/dev/null
+  helm repo update seaweedfs-csi-driver >/dev/null
+  helm upgrade seaweedfs-csi-driver seaweedfs-csi-driver/seaweedfs-csi-driver \
+    --namespace "${SEAWEEDFS_NAMESPACE}" \
+    --version "${chart_version}" \
+    --reuse-values \
+    --set security.enabled=true \
+    --set security.existingConfigMap="${SEAWEEDFS_SECURITY_CONFIG}" \
+    --set node.updateStrategy.type=OnDelete \
+    --set mountService.updateStrategy.type=OnDelete \
+    --timeout 15m
+  info "CSI Helm configuration updated; node and mount pods were not restarted."
+  print_csi_rollout_guidance
+}
+
+run_storage_seaweedfs_read_secret() {
+  local apply=0
+  local assume_yes=0
+  local namespace="${TOKENVISOR_NAMESPACE}"
+  local secret_name="${SEAWEEDFS_FILER_READ_SECRET_NAME}"
+  local read_key key_file
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply) apply=1 ;;
+      --yes|-y) assume_yes=1 ;;
+      --namespace)
+        [ "$#" -ge 2 ] || die "storage seaweedfs-read-secret --namespace requires a value"
+        namespace="$2"
+        shift
+        ;;
+      --secret)
+        [ "$#" -ge 2 ] || die "storage seaweedfs-read-secret --secret requires a value"
+        secret_name="$2"
+        shift
+        ;;
+      --dry-run) apply=0 ;;
+      *) die "unknown storage seaweedfs-read-secret option: $1" ;;
+    esac
+    shift
+  done
+
+  require_tool kubectl
+  read_key="$(read_seaweedfs_filer_read_key)"
+  [ -n "${read_key}" ] || die "SeaweedFS Filer read signing key is missing"
+  validate_signing_key "Filer read" "${read_key}" \
+    || die "SeaweedFS Filer read signing key is weaker than 32 characters"
+  if [ "${apply}" -ne 1 ]; then
+    cat <<EOF
+The SeaweedFS Filer read key will be copied into Secret ${namespace}/${secret_name}.
+Only jwt.filer_signing.read.key is materialized; the write key is never copied or printed.
+Run with --apply to execute.
+EOF
+    return 0
+  fi
+
+  confirm_apply "SeaweedFS Filer read-key Secret ${namespace}/${secret_name}" "${assume_yes}"
+  apply_namespace "${namespace}"
+  key_file="$(mktemp)"
+  chmod 600 "${key_file}" || {
+    rm -f "${key_file}"
+    die "failed to protect temporary SeaweedFS read key"
+  }
+  printf '%s' "${read_key}" > "${key_file}" || {
+    rm -f "${key_file}"
+    die "failed to stage the SeaweedFS Filer read key"
+  }
+  kubectl -n "${namespace}" create secret generic "${secret_name}" \
+    --from-file=filer_read_key="${key_file}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null || {
+      rm -f "${key_file}"
+      die "failed to apply the SeaweedFS Filer read-key Secret"
+    }
+  rm -f "${key_file}"
+  info "Secret ${namespace}/${secret_name} now contains only the SeaweedFS Filer read key."
 }
 
 apply_audit_s3_secret() {
@@ -2002,6 +2630,15 @@ run_storage() {
     seaweedfs)
       run_storage_seaweedfs "$@"
       ;;
+    seaweedfs-auth)
+      run_storage_seaweedfs_auth "$@"
+      ;;
+    seaweedfs-csi-auth)
+      run_storage_seaweedfs_csi_auth "$@"
+      ;;
+    seaweedfs-read-secret)
+      run_storage_seaweedfs_read_secret "$@"
+      ;;
     model-pvcs)
       run_storage_model_pvcs "$@"
       ;;
@@ -2012,12 +2649,18 @@ Storage commands:
   ./bin/tokenvisor-prereqs storage local-path [--apply] [--yes]
   ./bin/tokenvisor-prereqs storage audit-s3 [--apply] [--yes]
   ./bin/tokenvisor-prereqs storage seaweedfs [--apply] [--yes]
+  ./bin/tokenvisor-prereqs storage seaweedfs-auth [--apply] [--yes]
+  ./bin/tokenvisor-prereqs storage seaweedfs-csi-auth [--apply] [--yes] [--check]
+  ./bin/tokenvisor-prereqs storage seaweedfs-read-secret [--apply] [--yes] [--namespace NAMESPACE] [--secret NAME]
   ./bin/tokenvisor-prereqs storage model-pvcs [--apply] [--yes] [--path PATH] [--size SIZE]
 
 Notes:
   - OpenEBS is not installed by this helper.
   - audit-s3 configures external S3 or installs helper-managed bundled SeaweedFS + CSI.
   - seaweedfs installs SeaweedFS + CSI without enabling S3.
+  - seaweedfs-auth enables Filer JWT read/write authentication on an existing helper-managed release and never changes CSI.
+  - seaweedfs-csi-auth updates CSI Helm state and reports the required manual OnDelete rollout.
+  - seaweedfs-read-secret copies only the Filer read key into a consumer namespace Secret.
   - model-pvcs assumes SeaweedFS CSI is already installed.
 EOF
       ;;

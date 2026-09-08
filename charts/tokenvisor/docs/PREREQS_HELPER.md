@@ -12,6 +12,8 @@ The helper covers:
 - local-path installation for RKE2/dev clusters
 - external audit S3 configuration or helper-managed bundled SeaweedFS S3 + CSI
 - independent SeaweedFS + CSI installation for RWX model storage
+- SeaweedFS Filer HTTP JWT authentication and read-only consumer key handoff
+- optional, separately drained SeaweedFS CSI authentication update
 - SeaweedFS CSI model PV/PVC manifests as a separate optional step
 - deterministic local Helm values assembly
 - readiness checks before installing TokenVisor
@@ -142,6 +144,35 @@ Configure audit S3 storage with:
 ```
 
 The interactive command starts by asking whether S3 storage is external. The external path renders an EMU values override and patches the two audit S3 keys into the existing `emu-secret`; it does not install SeaweedFS. The bundled path separately prompts for the volume-server count, number of data copies, data directories per server, and `hostPath` or PVC backing. PVC-backed volume data has its own StorageClass and per-directory size. It then installs SeaweedFS with its authenticated filer S3 gateway, creates the audit bucket, and installs the SeaweedFS CSI driver.
+
+Fresh bundled and standalone SeaweedFS installs enable both Filer HTTP JWT directions and configure CSI with the same release-owned `security.toml` from the start. The helper generates distinct high-entropy signing keys and keeps them in the release's `*-security-config` ConfigMap; it never prints keys or writes them to committed values. Consumers such as Oyster receive only a namespace-local Secret containing the read key. The write key remains owned by TokenVisor and is used by CSI for its optional authenticated copy operation.
+
+For an existing helper-managed SeaweedFS release, migrate Filer authentication without touching CSI:
+
+```bash
+./bin/tokenvisor-prereqs storage seaweedfs-auth --apply
+```
+
+This operation is intentionally SeaweedFS-only. It preserves existing keys, generates only missing keys, waits for the SeaweedFS Helm rollout, and checks that both signing-key sections remain present. Existing CSI PVCs remain functional through Filer gRPC; until CSI is upgraded, its Filer HTTP copy optimization receives a 401 and falls back to ordinary chunk copying.
+
+Give a consumer only the read key by creating a namespace-local Secret:
+
+```bash
+./bin/tokenvisor-prereqs storage seaweedfs-read-secret \
+  --namespace oyster \
+  --secret seaweedfs-filer-read \
+  --apply
+```
+
+The command reads the key from the TokenVisor-owned security ConfigMap and does not grant the consumer access to that ConfigMap or reveal the write key. Keep the Secret in the deployment secret-management system rather than committing it to Git.
+
+When the optimization is worth a separate maintenance window, update CSI with:
+
+```bash
+./bin/tokenvisor-prereqs storage seaweedfs-csi-auth --apply
+```
+
+The helper updates the CSI Helm release and reports the controller, node, and mount rollout state plus PVC consumers by node. Because the node and mount DaemonSets use `OnDelete`, existing pods are not restarted by Helm. Follow the per-node cordon/evict/delete/verify procedure in [SEAWEEDFS.md](SEAWEEDFS.md); the helper does not evict application workloads automatically. A single-replica controller may also be held Pending by required anti-affinity until its old pod is removed.
 
 Audit storage configuration does not change capture policy. Capture defaults to `opt_out`; set `EMU_AUDIT_RECORD_MODE` explicitly in the TokenVisor values when a different policy is required.
 

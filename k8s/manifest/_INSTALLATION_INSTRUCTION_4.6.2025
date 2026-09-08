@@ -140,10 +140,14 @@ kubectl apply -f nfs-csi-storageclass.yaml
 kubectl apply -f nfs-model-storage-pv.yaml
 kubectl apply -f nfs-model-storage-pvc.yaml
 
-### INSTALL SeaweedFS S3 for Audit Records (optional; before TokenVisor) ###
+### SET UP SeaweedFS S3 for Audit Records (optional; before TokenVisor) ###
 # This provides S3-compatible storage for EMU audit record media. It does not
 # replace the NFS/RWX model-storage choice above.
-#
+# Choose exactly one path below: fresh install or existing-install migration.
+helm repo add seaweedfs https://seaweedfs.github.io/seaweedfs/helm
+helm repo update
+
+### FRESH SeaweedFS Install ###
 # Copy the example locally, replace CHANGE_ME_* credentials, choose the bucket,
 # and adjust the StorageClass or hostPath. Do not commit real credentials.
 cp seaweedfs-s3-values.yaml /tmp/seaweedfs-s3-values.yaml
@@ -153,13 +157,38 @@ $EDITOR /tmp/seaweedfs-s3-values.yaml
 # configured path on this node first, then label the node.
 kubectl label node <seaweedfs-volume-node> tokenvisor.io/seaweedfs-volume=true
 
-helm repo add seaweedfs https://seaweedfs.github.io/seaweedfs/helm
-helm repo update
+# Run once immediately before the initial Helm install. The values file enables
+# Filer read/write JWT; this script supplies the keys without storing them there.
+./seaweedfs-jwt-preseed.sh
+
 helm upgrade --install seaweedfs seaweedfs/seaweedfs \
   --namespace seaweedfs \
   --create-namespace \
   --version 4.39.0 \
   -f /tmp/seaweedfs-s3-values.yaml
+
+### EXISTING SeaweedFS Install Without Filer Auth (alternative) ###
+# Skip this entire section after the fresh install above. If the ConfigMap
+# exists, back it up, preserve its other content, and add distinct 32-byte keys
+# to [jwt.filer_signing] and [jwt.filer_signing.read]. Otherwise, pre-seed it.
+if kubectl -n seaweedfs get configmap seaweedfs-security-config >/dev/null 2>&1; then
+  kubectl -n seaweedfs edit configmap seaweedfs-security-config
+else
+  ./seaweedfs-jwt-preseed.sh
+fi
+# Preserve the installed values. Enabling auth changes the Filer pod template,
+# which rolls the pods so they load the newly added keys.
+helm upgrade seaweedfs seaweedfs/seaweedfs \
+  --namespace seaweedfs \
+  --version 4.39.0 \
+  --reuse-values \
+  --set global.seaweedfs.securityConfig.jwtSigning.filerRead=true \
+  --set global.seaweedfs.securityConfig.jwtSigning.filerWrite=true \
+  --wait
+
+### AFTER EITHER PATH: CREATE Oyster Filer Read Secret ###
+# Give Oyster only jwt.filer_signing.read.key as Secret key filer_read_key.
+./seaweedfs-filer-read-secret.sh
 
 # Before applying emu-secret.yaml and emu-config.yaml below, add these values:
 # emu-secret.yaml stringData:
@@ -337,12 +366,12 @@ helm repo update
 helm upgrade --install seaweedfs-csi-driver seaweedfs-csi-driver/seaweedfs-csi-driver \
   --namespace seaweedfs \
   --version 0.2.30 \
-  --set seaweedfsFiler=seaweedfs-filer.seaweedfs.svc.cluster.local:8888 \
-  --set mountService.enabled=true \
-  --set node.updateStrategy.type=OnDelete
+  -f seaweedfs-csi-values.yaml
 
-# Create static RWX model PV/PVC pairs only after CSI is ready. For the current
-# maintained workflow use:
-#   cd ../../charts/tokenvisor
-#   ./bin/tokenvisor-prereqs storage model-pvcs --apply
-
+# Existing CSI pods are not restarted because both DaemonSets use OnDelete.
+# Per node: cordon, stop SeaweedFS PVC consumers, replace the mount pod, replace
+# the node pod, verify both are Ready, then uncordon and restart consumers.
+# Static PV capacity is that mount's ceiling in CSI v1.4.24. Mounts using the
+# same collection share its usage but may have different ceilings. Remount
+# consumers after changing PV capacity, and keep matching PV/PVC sizes.
+# Create static RWX model PV/PVC pairs only after CSI is ready.

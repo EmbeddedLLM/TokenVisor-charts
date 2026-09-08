@@ -29,6 +29,12 @@ global:
       enabled: true
     enableReplication: true
     replicationPlacement: "000"
+    # Protect both Filer HTTP reads and writes. Before the initial install, run
+    # ./seaweedfs-jwt-preseed.sh to create distinct keys outside this file.
+    securityConfig:
+      jwtSigning:
+        filerWrite: true
+        filerRead: true
 
 master:
   replicas: 1

@@ -1,0 +1,29 @@
+# Minimal override for seaweedfs-csi-driver chart 0.2.30.
+#
+# This file expects the SeaweedFS chart to have already created
+# <release>-security-config with security.toml. Keep the ConfigMap name and
+# namespace aligned with the SeaweedFS release. The ConfigMap contains the
+# Filer JWT keys; do not copy keys into this committed values file.
+#
+# Install or upgrade after applying seaweedfs-s3-values.yaml:
+#   helm upgrade --install seaweedfs-csi-driver \
+#     seaweedfs-csi-driver/seaweedfs-csi-driver \
+#     --namespace seaweedfs --create-namespace \
+#     --version 0.2.30 \
+#     -f k8s/manifest/seaweedfs-csi-values.yaml
+
+seaweedfsFiler: "seaweedfs-filer-client.seaweedfs:8888"
+
+security:
+  enabled: true
+  existingConfigMap: seaweedfs-security-config
+
+# Existing mounts must be drained before these pods are replaced. OnDelete
+# makes a Helm upgrade update the templates without restarting live mounts.
+mountService:
+  updateStrategy:
+    type: OnDelete
+
+node:
+  updateStrategy:
+    type: OnDelete

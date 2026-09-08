@@ -111,8 +111,8 @@ Replication also needs an operational repair process. SeaweedFS does not automat
 
 The bundled path installs these pinned upstream charts with `helm upgrade --install`:
 
-- `seaweedfs/seaweedfs` `4.39.0`, with the authenticated filer S3 gateway enabled and the audit bucket created by the chart hook;
-- `seaweedfs-csi-driver/seaweedfs-csi-driver` `0.2.30`.
+- `seaweedfs/seaweedfs` `4.39.0`, with the authenticated Filer S3 gateway and both Filer HTTP JWT directions enabled; the audit bucket is created by the chart hook;
+- `seaweedfs-csi-driver/seaweedfs-csi-driver` `0.2.30`, configured to mount the same Filer JWT `security.toml`.
 
 It writes `.local/seaweedfs-values.yaml`, `.local/seaweedfs-csi-values.yaml`, and the helper-owned `.local/seaweedfs-s3-config-secret.yaml` in addition to the audit configuration files. The generated SeaweedFS values include the complete topology and hostPath node placement, so a later `storage audit-s3 --apply` reuses them without repeating the questionnaire. The two generated Secret files have mode `0600`.
 
@@ -125,6 +125,71 @@ The bundled prerequisite pins `seaweedfs/seaweedfs` chart `4.39.0`. This is a fr
 The `4.16.0` chart used replication and monitoring values directly under `global`; `4.39.0` nests them under `global.seaweedfs`. The helper renders the `4.39.0` layout. Applying old values to the new chart can silently leave master and filer replication at `000`.
 
 Before upgrading an existing `4.16.0` release, take a backup or storage snapshot of master and filer data, save `helm get values <release> -n <namespace>`, run a reviewed `helm upgrade --dry-run --debug`, and perform the actual upgrade with `--wait`. Upgrade the SeaweedFS chart separately from the CSI driver, then verify authenticated S3 bucket access.
+
+### Filer HTTP JWT authentication
+
+The bundled helper enables both Filer HTTP JWT modes on fresh installations:
+
+```yaml
+global:
+  seaweedfs:
+    securityConfig:
+      jwtSigning:
+        filerWrite: true
+        filerRead: true
+```
+
+`filerRead` protects Filer HTTP `GET` and `HEAD` requests. `filerWrite` protects Filer HTTP `POST`, `PUT`, and `DELETE` requests. These settings do not enable SeaweedFS volume JWTs, gRPC TLS, or network policy. Normal CSI provisioning and mount operations use Filer gRPC and remain independent of Filer HTTP JWTs.
+
+The SeaweedFS chart stores `security.toml` in the release-owned `<release>-security-config` ConfigMap. The chart can generate a key when that ConfigMap does not exist, but committed values files must never contain real keys. The prerequisite helper creates distinct, high-entropy read and write keys, preserves them across reruns, and keeps the ConfigMap stable across upgrades. The same ConfigMap is the input to the optional CSI update below.
+
+For an existing helper-managed SeaweedFS installation, enable authentication with the SeaweedFS-only migration:
+
+```bash
+./bin/tokenvisor-prereqs storage seaweedfs-auth --apply
+```
+
+The command upgrades only the SeaweedFS release, waits for the Helm rollout, and checks that both signing-key sections remain present. It does not update or restart CSI. Existing and new CSI-backed PVCs remain usable; the CSI mount service temporarily falls back to ordinary chunk copying until it is given the write key. Treat the SeaweedFS rollout as a short storage maintenance window because each Filer pod must restart to read the new `security.toml`.
+
+#### Read-only consumer handoff
+
+Consumers such as Oyster need only the Filer read key. The helper's handoff must create or render a namespace-local Secret containing the read key, for example in the Oyster namespace. Do not grant Oyster access to the shared SeaweedFS ConfigMap and do not copy the write key into the consumer Secret. Keep the generated Secret out of Git and apply it with the same secret-manager workflow used for other deployment credentials. Repeat the handoff only when the TokenVisor-owned key is intentionally rotated.
+
+For the standard Oyster namespace and Secret name:
+
+```bash
+./bin/tokenvisor-prereqs storage seaweedfs-read-secret \
+  --namespace oyster \
+  --secret seaweedfs-filer-read \
+  --apply
+```
+
+Use a different namespace or Secret name when another consumer contract requires it. The command reads the key from the TokenVisor-owned ConfigMap and creates only the read-key Secret; it does not expose the write key.
+
+#### Optional CSI update
+
+After Filer authentication is verified, the CSI chart can be updated separately:
+
+```bash
+./bin/tokenvisor-prereqs storage seaweedfs-csi-auth --apply
+```
+
+This points the CSI chart at the existing `<release>-security-config` ConfigMap. It does not automatically restart the node or mount DaemonSets: both use `updateStrategy.type: OnDelete` so that a Helm update changes their templates while existing pods keep running. The controller Deployment normally rolls automatically. On a single-node cluster, its required anti-affinity can leave the replacement Pending. Finish the node procedure and uncordon the node first; if the old controller is healthy and the new one is still Pending, delete only the old pod by its exact name and wait for the Deployment rollout. Do not delete controller pods with a label selector because it could select both pods.
+
+The helper reports the nodes and workloads that still use the old CSI pods. Use this safe per-node procedure for each affected node:
+
+1. Update the CSI release and confirm that Filer authentication is healthy.
+2. If the node has no SeaweedFS PVC consumers, cordon it, delete its CSI mount and node DaemonSet pods, wait for replacement pods to become Ready, then uncordon it.
+3. Otherwise, cordon or taint the node and evict or stop every workload using a SeaweedFS PVC on that node. Wait for the mounts to be released before touching CSI pods.
+4. Delete the `seaweedfs-csi-driver-mount` pod on the node and wait for its replacement to become Ready.
+5. Delete the `seaweedfs-csi-driver-node` pod on the node and wait for its replacement to become Ready.
+6. Recreate or reschedule the workloads, verify existing PVC data, and uncordon the node.
+
+Repeat the procedure on every node. On a single-node cluster this requires workload downtime. Do not ask the helper to evict arbitrary application pods; the operator must choose the disruption and respect workload-specific PodDisruptionBudgets and scheduling constraints. The CSI update restores authenticated `copy_file_range` optimization; it is not required for ordinary PVC read, write, create, or delete behavior.
+
+#### Rollback and key rotation
+
+Before migration, save the SeaweedFS Helm values and securely back up the signing ConfigMap. A rollback to the pre-authentication Helm revision disables Filer HTTP authentication and may render the signing sections out of the chart-managed ConfigMap, so do not describe it as a key-preserving operation. If the optional CSI update has already been completed, roll back CSI first and drain/recreate its affected node and mount pods before rolling back SeaweedFS. Verify PVC and S3 access after each step. Key rotation is a coordinated maintenance operation: back up and update the SeaweedFS ConfigMap, roll SeaweedFS, refresh the consumer read-key Secret, and then perform the optional drained CSI update.
 
 ## Optional: SeaweedFS RWX model storage
 
@@ -235,6 +300,61 @@ s3:
 ```
 
 The in-cluster endpoint is `http://<release>-s3.<namespace>.svc.cluster.local:8333`. Apply the same endpoint, bucket, credentials, region, and prefix to `emu-secret` and an EMU values override as shown in the external-S3 section. Do not enable both the standalone top-level `s3.enabled` gateway and `filer.s3.enabled` unless that topology is intentional.
+
+### Manual Filer JWT key pre-seeding
+
+The upstream chart's fallback key is intended for development and is shorter than the 32-byte minimum used by the prerequisite helper. For a manual fresh install, pre-seed the Helm-owned ConfigMap with distinct 32-byte keys before installing either chart. This shell flow keeps the keys in a `0600` temporary file and never places them in a committed values file:
+
+```bash
+set -euo pipefail
+RELEASE=seaweedfs
+NAMESPACE=seaweedfs
+SECURITY_CONFIG="${RELEASE}-security-config"
+umask 077
+SECURITY_FILE="$(mktemp)"
+CONFIGMAP_FILE="$(mktemp)"
+trap 'rm -f "$SECURITY_FILE" "$CONFIGMAP_FILE" "$CONFIGMAP_FILE.labeled" "$CONFIGMAP_FILE.annotated"' EXIT
+
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+read_key="$(openssl rand -hex 32)"
+write_key="$(openssl rand -hex 32)"
+while [ "$read_key" = "$write_key" ]; do
+  write_key="$(openssl rand -hex 32)"
+done
+cat >"$SECURITY_FILE" <<EOF
+[jwt.filer_signing]
+key = "$write_key"
+[jwt.filer_signing.read]
+key = "$read_key"
+EOF
+
+kubectl -n "$NAMESPACE" create configmap "$SECURITY_CONFIG" \
+  --from-file=security.toml="$SECURITY_FILE" \
+  --dry-run=client -o yaml >"$CONFIGMAP_FILE"
+kubectl label --local -f "$CONFIGMAP_FILE" \
+  app.kubernetes.io/managed-by=Helm \
+  app.kubernetes.io/name=seaweedfs \
+  app.kubernetes.io/instance="$RELEASE" \
+  -o yaml >"$CONFIGMAP_FILE.labeled"
+kubectl annotate --local -f "$CONFIGMAP_FILE.labeled" \
+  meta.helm.sh/release-name="$RELEASE" \
+  meta.helm.sh/release-namespace="$NAMESPACE" \
+  -o yaml >"$CONFIGMAP_FILE.annotated"
+kubectl apply -f "$CONFIGMAP_FILE.annotated"
+```
+
+Then, from the repository root, install SeaweedFS with [`seaweedfs-s3-values.yaml`](../../../k8s/manifest/seaweedfs-s3-values.yaml), which enables both JWT directions, followed by the matching CSI override:
+
+```bash
+helm upgrade --install "$RELEASE" seaweedfs/seaweedfs \
+  --namespace "$NAMESPACE" --create-namespace --version 4.39.0 \
+  -f k8s/manifest/seaweedfs-s3-values.yaml
+helm upgrade --install seaweedfs-csi-driver seaweedfs-csi-driver/seaweedfs-csi-driver \
+  --namespace "$NAMESPACE" --create-namespace --version 0.2.30 \
+  -f k8s/manifest/seaweedfs-csi-values.yaml
+```
+
+The CSI values reference the same `${SECURITY_CONFIG}` ConfigMap. Back up the ConfigMap securely; losing or replacing either key invalidates clients that still use it. Prefer the prerequisite helper for production installs because it performs this key lifecycle and Helm ownership setup idempotently.
 
 ## Operational notes
 
