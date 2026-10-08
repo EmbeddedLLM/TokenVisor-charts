@@ -359,7 +359,7 @@ spec:
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMPodScrape
 metadata:
-  name: skypilot-vllm-scrape
+  name: vllm-scrape
   namespace: {{ include "tokenvisor.namespace" . }}
   labels:
     app.kubernetes.io/part-of: vm-operator
@@ -367,17 +367,23 @@ metadata:
 spec:
   selector:
     matchLabels:
-      deployment: skypilot
-      deployment-type: vllm
+      tokenvisor.ai/engine: vllm
   namespaceSelector:
     matchNames:
       - skypilot
+      - {{ .Values.llmd.namespace }}
   podMetricsEndpoints:
-    - targetPort: 8000
+    - port: http
       relabelConfigs:
         - source_labels: [__meta_kubernetes_pod_name]
           action: replace
           target_label: pod_name
+        - source_labels: [__meta_kubernetes_pod_label_tokenvisor_ai_deployment_id]
+          target_label: deployment_id
+      metricRelabelConfigs:
+        - source_labels: [__name__]
+          regex: "vllm:.*"
+          action: keep
 {{- if $keeperEnabled }}
 ---
 apiVersion: operator.victoriametrics.com/v1beta1
