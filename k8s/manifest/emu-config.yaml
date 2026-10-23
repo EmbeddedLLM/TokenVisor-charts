@@ -7,6 +7,7 @@ metadata:
 data:
   EMU_PORT: "5969"
   EMU_WORKERS: "8"
+  EMU_FROM_EMAIL: "no-reply@tokenvisor.ai"
   EMU_OPENTELEMETRY_HOST: "localhost"
   EMU_OPENTELEMETRY_PORT: "4317"
   EMU_REDIS_HOST: "dragonfly.tokenvisor.svc.cluster.local"

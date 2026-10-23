@@ -19,7 +19,6 @@ data:
   ABSOLUTE_AUTH_TIMEOUT: "86400"
   IDLE_AUTH_TIMEOUT: "900"
   STUDIO_APP_NAME: "TokenVisor"
-  STUDIO_FROM_EMAIL: "no-reply@tokenvisor.ai"
 
   ### OAUTH & AUTH0 & SSO Configuration ###
   # JWT_CLAIMS_NAMESPACE: ""

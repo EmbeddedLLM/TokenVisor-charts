@@ -35,6 +35,7 @@ emu:
       memory: "4Gi"
   config:
     EMU_PORT: "5969"
+    EMU_FROM_EMAIL: "no-reply@tokenvisor.ai"
     EMU_WORKERS: "8"
     EMU_OPENTELEMETRY_HOST: "localhost"
     EMU_OPENTELEMETRY_PORT: "4317"
@@ -270,7 +271,6 @@ studio:
     ABSOLUTE_AUTH_TIMEOUT: "86400"
     IDLE_AUTH_TIMEOUT: "900"
     STUDIO_APP_NAME: "TokenVisor"
-    STUDIO_FROM_EMAIL: "no-reply@tokenvisor.ai"
     AUTH0_ISSUER_BASE_URL: ""
     AUTH0_CLIENT_ID: ""
     AUTH0_CLIENT_SECRET: ""
