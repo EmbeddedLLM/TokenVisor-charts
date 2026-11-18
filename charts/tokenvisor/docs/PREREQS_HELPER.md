@@ -325,7 +325,7 @@ Defaults:
 - Helm release: `skypilot`
 - namespace: `skypilot`
 - chart version: `0.12.0`
-- image: `ghcr.io/embeddedllm/skypilot:v0.12.0`
+- image: `ghcr.io/embeddedllm/skypilot:v0.12.0-ellm.20261118.4`
 - storage class: `openebs-three-replica`
 
 Customize common settings:

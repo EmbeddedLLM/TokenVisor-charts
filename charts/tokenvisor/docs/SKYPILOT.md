@@ -23,7 +23,7 @@ If using the prerequisite helper, these are covered by the recommended flow in `
 ```bash
 cat > skypilot-values.yaml <<'YAML'
 apiService:
-  image: ghcr.io/embeddedllm/skypilot:v0.12.0
+  image: ghcr.io/embeddedllm/skypilot:v0.12.0-ellm.20261118.4
   config: |
     serve:
       controller:

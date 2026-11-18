@@ -2994,7 +2994,7 @@ run_skypilot() {
   local release_name="skypilot"
   local chart_version="0.12.0"
   local storage_class="openebs-three-replica"
-  local image="ghcr.io/embeddedllm/skypilot:v0.12.0"
+  local image="ghcr.io/embeddedllm/skypilot:v0.12.0-ellm.20261118.4"
   local output="${LOCAL_DIR}/skypilot-values.yaml"
 
   while [ "$#" -gt 0 ]; do

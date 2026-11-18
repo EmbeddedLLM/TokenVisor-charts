@@ -103,7 +103,7 @@ spec:
       serviceAccountName: skypilot-api-sa
       containers:
         - name: skypilot-api
-          image: ghcr.io/embeddedllm/skypilot:v0.12.0
+          image: ghcr.io/embeddedllm/skypilot:v0.12.0-ellm.20261118.4
           imagePullPolicy: Always
           env:
             - name: SKYPILOT_DEV
